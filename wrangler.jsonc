@@ -1,14 +1,14 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "webapp",
+  "name": "quizmaster-pro",
   "compatibility_date": "2026-04-05",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "quizmaster-db",
-      "database_id": "local-quizmaster-db"
+      "database_name": "quizmaster-production",
+      "database_id": "e945894b-2449-4de2-8dc0-b780f3f50878"
     }
   ]
 }
