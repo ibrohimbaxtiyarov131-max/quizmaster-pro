@@ -142,7 +142,86 @@ const I18N = {
 let LANG = localStorage.getItem('qm_lang') || 'ru';
 const t = (k) => (I18N[LANG][k] || I18N.ru[k] || k);
 
-// ───── STORAGE ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// API CLIENT — общается с Hono backend + D1
+// ═══════════════════════════════════════════════════════════════
+const API_BASE = '/api';
+function getAuthToken() { return localStorage.getItem('qm_auth_token') || null; }
+function setAuthToken(t) { if (t) localStorage.setItem('qm_auth_token', t); else localStorage.removeItem('qm_auth_token'); }
+
+async function apiFetch(path, options = {}) {
+  const token = getAuthToken();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (token) headers['X-Auth-Token'] = token;
+  try {
+    const res = await fetch(API_BASE + path, { ...options, headers });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: e.message } };
+  }
+}
+
+const API = {
+  // Auth
+  async register(name, email, password, avatar, provider) {
+    return apiFetch('/auth/register', { method: 'POST', body: JSON.stringify({ name, email, password, avatar, provider }) });
+  },
+  async login(email, password) {
+    return apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+  },
+  async social(provider, name, email, avatar) {
+    return apiFetch('/auth/social', { method: 'POST', body: JSON.stringify({ provider, name, email, avatar }) });
+  },
+  async guest(name) {
+    return apiFetch('/auth/guest', { method: 'POST', body: JSON.stringify({ name }) });
+  },
+  async me() {
+    return apiFetch('/auth/me');
+  },
+  async logout() {
+    const r = await apiFetch('/auth/logout', { method: 'POST' });
+    setAuthToken(null);
+    return r;
+  },
+  async updateProfile(name, avatar) {
+    return apiFetch('/auth/profile', { method: 'PUT', body: JSON.stringify({ name, avatar }) });
+  },
+  // Quizzes
+  async getMyQuizzes() {
+    return apiFetch('/quizzes');
+  },
+  async saveQuiz(quiz) {
+    return apiFetch('/quizzes', { method: 'POST', body: JSON.stringify(quiz) });
+  },
+  async updateQuiz(id, quiz) {
+    return apiFetch('/quizzes/' + id, { method: 'PUT', body: JSON.stringify(quiz) });
+  },
+  async deleteQuiz(id) {
+    return apiFetch('/quizzes/' + id, { method: 'DELETE' });
+  },
+  async findByCodePin(code, pin) {
+    return apiFetch('/quizzes/find?code=' + encodeURIComponent(code) + '&pin=' + encodeURIComponent(pin));
+  },
+  async getQuiz(id) {
+    return apiFetch('/quizzes/' + id);
+  },
+  // Attempts
+  async saveAttempt(data) {
+    return apiFetch('/attempts', { method: 'POST', body: JSON.stringify(data) });
+  },
+  async getHistory() {
+    return apiFetch('/attempts');
+  },
+  async getAnalytics(quizId) {
+    return apiFetch('/analytics/' + quizId);
+  },
+  async health() {
+    return apiFetch('/health');
+  },
+};
+
+
 const STORAGE = {
   QUIZZES:  'qm_quizzes',
   HISTORY:  'qm_history',
@@ -169,6 +248,56 @@ function getInitials(name) {
   if (!name) return '?';
   return name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
 }
+
+// ─── Sync quizzes from server → merge with local ──────────────
+async function syncQuizzesFromServer() {
+  if (!getAuthToken()) return;
+  const r = await API.getMyQuizzes();
+  if (!r.ok) return;
+  const serverQuizzes = r.data.quizzes || [];
+  if (!serverQuizzes.length) return;
+  const localById = {};
+  state.quizzes.forEach(q => { localById[q.id] = q; });
+  serverQuizzes.forEach(q => { localById[q.id] = q; });
+  state.quizzes = Object.values(localById).sort((a,b) => (b.updatedAt||b.createdAt||b.created||0) - (a.updatedAt||a.createdAt||a.created||0));
+  saveStorage(STORAGE.QUIZZES, state.quizzes);
+}
+
+// ─── Push local quiz to server ────────────────────────────────
+async function pushQuizToServer(quiz) {
+  if (!getAuthToken()) return quiz;
+  const r = await API.saveQuiz(quiz);
+  if (r.ok && r.data.quiz) return r.data.quiz;
+  return quiz;
+}
+
+// ─── Sync history from server ─────────────────────────────────
+async function syncHistoryFromServer() {
+  if (!getAuthToken()) return;
+  const r = await API.getHistory();
+  if (!r.ok) return;
+  const serverAttempts = r.data.attempts || [];
+  if (!serverAttempts.length) return;
+  const serverHistory = serverAttempts.map(a => ({
+    id: a.id,
+    quizId: a.quizId,
+    quizTitle: state.quizzes.find(q => q.id === a.quizId)?.title || 'Unknown',
+    percent: a.percent,
+    correct: a.correct,
+    wrong: a.wrong,
+    skipped: a.skipped,
+    total: a.total,
+    passed: a.passed,
+    duration: a.duration,
+    date: a.createdAt ? a.createdAt * 1000 : Date.now(),
+  }));
+  const byId = {};
+  state.history.forEach(h => { byId[h.id || h.date] = h; });
+  serverHistory.forEach(h => { byId[h.id] = h; });
+  state.history = Object.values(byId).sort((a,b) => (b.date||0)-(a.date||0));
+  saveStorage(STORAGE.HISTORY, state.history);
+}
+
 
 // ───── STATE ──────────────────────────────────────────────────
 let state = {
@@ -665,6 +794,8 @@ function deleteQuiz(id) {
     state.quizzes = state.quizzes.filter(q=>q.id!==id);
     saveStorage(STORAGE.QUIZZES, state.quizzes);
     toast(t('deletedSuccess'), 'success');
+    // Delete from server in background
+    API.deleteQuiz(id).catch(()=>{});
     renderPageContent();
   });
 }
@@ -1200,6 +1331,13 @@ function saveQuizEditor() {
   else state.quizzes.unshift(quiz);
   saveStorage(STORAGE.QUIZZES, state.quizzes);
   toast(t('savedSuccess'), 'success');
+  // Push to server in background
+  pushQuizToServer(quiz).then(serverQuiz => {
+    if (serverQuiz && serverQuiz.id) {
+      const i = state.quizzes.findIndex(q=>q.id===serverQuiz.id);
+      if (i>=0) { state.quizzes[i] = serverQuiz; saveStorage(STORAGE.QUIZZES, state.quizzes); }
+    }
+  });
   navigate('my-quizzes');
 }
 
@@ -2434,13 +2572,15 @@ window.onBackdropClick = function(e) {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// AUTH SCREEN
+// AUTH SCREEN — реальная авторизация через backend API
 // ═══════════════════════════════════════════════════════════════
 const AVATARS = ['🧑','👩','👨','🧒','👧','👦','🧑‍💻','👩‍💻','👨‍🎓','👩‍🎓','🦸','🦹'];
 let selectedAvatar = AVATARS[0];
-let authProvider = 'email';
 
 function showAuthScreen(afterAuth) {
+  // Remove any existing overlay
+  document.getElementById('auth-overlay')?.remove();
+
   const overlay = document.createElement('div');
   overlay.className = 'auth-overlay';
   overlay.id = 'auth-overlay';
@@ -2450,103 +2590,273 @@ function showAuthScreen(afterAuth) {
         <div class="auth-logo-icon"><i class="fas fa-brain"></i></div>
         <div class="auth-logo-text">${t('appName')}</div>
       </div>
-      <div class="auth-title">${LANG==='ru'?'Добро пожаловать!':'Xush kelibsiz!'}</div>
-      <div class="auth-subtitle">${LANG==='ru'?'Войдите, чтобы сохранять прогресс и результаты':'Davomiylikni saqlash uchun kiring'}</div>
 
-      <button class="social-btn social-google" data-provider="google">
-        <span class="social-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
-        <span class="social-label">${LANG==='ru'?'Продолжить с Google':'Google orqali kirish'}</span>
-        <i class="fas fa-arrow-right social-arrow"></i>
-      </button>
-      <button class="social-btn social-facebook" data-provider="facebook">
-        <span class="social-icon"><i class="fab fa-facebook-f"></i></span>
-        <span class="social-label">${LANG==='ru'?'Продолжить с Facebook':'Facebook orqali kirish'}</span>
-        <i class="fas fa-arrow-right social-arrow"></i>
-      </button>
-      <button class="social-btn social-apple" data-provider="apple">
-        <span class="social-icon"><i class="fab fa-apple"></i></span>
-        <span class="social-label">${LANG==='ru'?'Продолжить с Apple':'Apple orqali kirish'}</span>
-        <i class="fas fa-arrow-right social-arrow"></i>
-      </button>
-      <button class="social-btn social-whatsapp" data-provider="whatsapp">
-        <span class="social-icon"><i class="fab fa-whatsapp"></i></span>
-        <span class="social-label">${LANG==='ru'?'Продолжить с WhatsApp':'WhatsApp orqali kirish'}</span>
-        <i class="fas fa-arrow-right social-arrow"></i>
-      </button>
+      <!-- TAB switcher -->
+      <div class="auth-tabs" id="auth-tabs">
+        <button class="auth-tab active" data-tab="social">${LANG==='ru'?'Войти':'Kirish'}</button>
+        <button class="auth-tab" data-tab="email">${LANG==='ru'?'Email':'Email'}</button>
+        <button class="auth-tab" data-tab="register">${LANG==='ru'?'Регистрация':'Ro\'yxatdan o\'tish'}</button>
+      </div>
 
-      <div class="auth-divider">${LANG==='ru'?'или введите имя':'yoki ismingizni kiriting'}</div>
+      <!-- SOCIAL / QUICK LOGIN tab -->
+      <div class="auth-panel" id="auth-panel-social">
+        <div class="auth-title">${LANG==='ru'?'Добро пожаловать!':'Xush kelibsiz!'}</div>
+        <div class="auth-subtitle">${LANG==='ru'?'Войдите через социальную сеть или выберите имя':'Ijtimoiy tarmoq orqali kiring'}</div>
 
-      <div id="auth-name-section">
-        <div class="auth-avatar-row" id="avatar-row">
+        <button class="social-btn social-google" data-provider="google">
+          <span class="social-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
+          <span class="social-label">${LANG==='ru'?'Продолжить с Google':'Google orqali kirish'}</span>
+          <i class="fas fa-arrow-right social-arrow"></i>
+        </button>
+        <button class="social-btn social-facebook" data-provider="facebook">
+          <span class="social-icon"><i class="fab fa-facebook-f" style="color:#1877f2"></i></span>
+          <span class="social-label">${LANG==='ru'?'Продолжить с Facebook':'Facebook orqali kirish'}</span>
+          <i class="fas fa-arrow-right social-arrow"></i>
+        </button>
+        <button class="social-btn social-apple" data-provider="apple">
+          <span class="social-icon"><i class="fab fa-apple" style="color:#000"></i></span>
+          <span class="social-label">${LANG==='ru'?'Продолжить с Apple':'Apple orqali kirish'}</span>
+          <i class="fas fa-arrow-right social-arrow"></i>
+        </button>
+        <button class="social-btn social-whatsapp" data-provider="whatsapp">
+          <span class="social-icon"><i class="fab fa-whatsapp" style="color:#25d366"></i></span>
+          <span class="social-label">${LANG==='ru'?'Продолжить с WhatsApp':'WhatsApp orqali kirish'}</span>
+          <i class="fas fa-arrow-right social-arrow"></i>
+        </button>
+
+        <!-- Social name prompt (shown after clicking provider) -->
+        <div id="social-name-section" style="display:none;margin-top:14px;">
+          <div class="auth-divider">${LANG==='ru'?'Введите ваше имя':'Ismingizni kiriting'}</div>
+          <div class="auth-avatar-row" id="social-avatar-row">
+            ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
+          </div>
+          <input class="auth-name-input" id="social-name-input" type="text" maxlength="40"
+            placeholder="${LANG==='ru'?'Ваше имя или никнейм…':'Ismingiz…'}">
+          <input class="auth-name-input" id="social-email-input" type="email" maxlength="100"
+            placeholder="${LANG==='ru'?'Email (необязательно)':'Email (ixtiyoriy)'}" style="margin-top:8px;">
+          <div id="social-auth-error" class="auth-error" style="display:none"></div>
+          <button class="auth-submit-btn" id="social-submit-btn">
+            <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
+          </button>
+        </div>
+
+        <div class="auth-skip">
+          <a id="auth-skip-link">${LANG==='ru'?'Продолжить без входа (гость)':'Kirmasdan davom etish (mehmon)'}</a>
+        </div>
+      </div>
+
+      <!-- EMAIL LOGIN tab -->
+      <div class="auth-panel" id="auth-panel-email" style="display:none">
+        <div class="auth-title">${LANG==='ru'?'Вход по Email':'Email orqali kirish'}</div>
+        <div class="auth-subtitle">${LANG==='ru'?'Введите email и пароль':'Email va parolingizni kiriting'}</div>
+        <input class="auth-name-input" id="login-email" type="email" placeholder="Email" autocomplete="email">
+        <input class="auth-name-input" id="login-password" type="password" placeholder="${LANG==='ru'?'Пароль':'Parol'}" style="margin-top:8px;" autocomplete="current-password">
+        <div id="login-error" class="auth-error" style="display:none"></div>
+        <button class="auth-submit-btn" id="login-submit-btn">
+          <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
+        </button>
+        <div class="auth-skip" style="margin-top:10px;">
+          <a id="goto-register">${LANG==='ru'?'Нет аккаунта? Зарегистрироваться':'Akkaunt yo\'qmi? Ro\'yxatdan o\'ting'}</a>
+        </div>
+      </div>
+
+      <!-- REGISTER tab -->
+      <div class="auth-panel" id="auth-panel-register" style="display:none">
+        <div class="auth-title">${LANG==='ru'?'Создать аккаунт':'Akkaunt yaratish'}</div>
+        <div class="auth-subtitle">${LANG==='ru'?'Тесты будут сохраняться на сервере':'Testlar serverda saqlanadi'}</div>
+        <div class="auth-avatar-row" id="reg-avatar-row">
           ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
         </div>
-        <input class="auth-name-input" id="auth-name-input" type="text" maxlength="40"
-          placeholder="${LANG==='ru'?'Ваше имя или никнейм…':'Ismingiz yoki taxallusIngiz…'}">
-        <div class="auth-name-hint">${LANG==='ru'?'Имя будет отображаться в результатах и сертификатах':'Ism natijalar va sertifikatlarda ko\'rsatiladi'}</div>
-        <button class="auth-submit-btn" id="auth-submit-btn">
-          <i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Войти':'Kirish'}
+        <input class="auth-name-input" id="reg-name" type="text" maxlength="40" placeholder="${LANG==='ru'?'Ваше имя или никнейм':'Ismingiz'}">
+        <input class="auth-name-input" id="reg-email" type="email" placeholder="Email" style="margin-top:8px;" autocomplete="email">
+        <input class="auth-name-input" id="reg-password" type="password" placeholder="${LANG==='ru'?'Пароль (мин. 6 символов)':'Parol (kamida 6 belgi)'}" style="margin-top:8px;" autocomplete="new-password">
+        <input class="auth-name-input" id="reg-password2" type="password" placeholder="${LANG==='ru'?'Повторите пароль':'Parolni takrorlang'}" style="margin-top:8px;" autocomplete="new-password">
+        <div id="reg-error" class="auth-error" style="display:none"></div>
+        <button class="auth-submit-btn" id="reg-submit-btn">
+          <i class="fas fa-user-plus"></i> ${LANG==='ru'?'Зарегистрироваться':'Ro\'yxatdan o\'tish'}
         </button>
+        <div class="auth-skip" style="margin-top:10px;">
+          <a id="goto-login">${LANG==='ru'?'Уже есть аккаунт? Войти':'Allaqon akkauntingiz bormi? Kiring'}</a>
+        </div>
       </div>
 
-      <div class="auth-skip">
-        <a id="auth-skip-link">${LANG==='ru'?'Продолжить без входа (гость)':'Kirmasdan davom etish (mehmon)'}</a>
-      </div>
     </div>`;
   document.body.appendChild(overlay);
 
-  // Avatar selection
-  overlay.querySelectorAll('.avatar-opt').forEach(el=>{
-    el.addEventListener('click',()=>{
-      overlay.querySelectorAll('.avatar-opt').forEach(a=>a.classList.remove('selected'));
+  // ── Tab switching ──
+  overlay.querySelectorAll('.auth-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
+      tab.classList.add('active');
+      overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
+      const panel = document.getElementById('auth-panel-' + tab.dataset.tab);
+      if (panel) panel.style.display = '';
+    });
+  });
+
+  // ── Social login ──
+  let currentProvider = 'email';
+  overlay.querySelectorAll('.social-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentProvider = btn.dataset.provider;
+      overlay.querySelectorAll('.social-btn').forEach(b => { b.style.opacity='0.5'; b.style.borderColor=''; });
+      btn.style.opacity = '1';
+      btn.style.borderColor = 'var(--primary)';
+      const nameSection = document.getElementById('social-name-section');
+      if (nameSection) nameSection.style.display = '';
+      document.getElementById('social-name-input')?.focus();
+    });
+  });
+
+  // Avatar selection (social tab)
+  overlay.querySelectorAll('#social-avatar-row .avatar-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      overlay.querySelectorAll('#social-avatar-row .avatar-opt').forEach(a => a.classList.remove('selected'));
       el.classList.add('selected');
       selectedAvatar = el.dataset.av;
     });
   });
 
-  // Social buttons → prefill name field
-  overlay.querySelectorAll('.social-btn').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      authProvider = btn.dataset.provider;
-      const prov = { google:'Google', facebook:'Facebook', apple:'Apple', whatsapp:'WhatsApp' };
-      const nameInput = document.getElementById('auth-name-input');
-      if (nameInput && !nameInput.value) nameInput.value = prov[authProvider] || '';
-      nameInput?.focus();
-      // Visual feedback
-      overlay.querySelectorAll('.social-btn').forEach(b=>b.style.opacity='0.6');
-      btn.style.opacity='1';
-      btn.style.borderColor='var(--primary)';
+  // Avatar selection (register tab)
+  overlay.querySelectorAll('#reg-avatar-row .avatar-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      overlay.querySelectorAll('#reg-avatar-row .avatar-opt').forEach(a => a.classList.remove('selected'));
+      el.classList.add('selected');
+      selectedAvatar = el.dataset.av;
     });
   });
 
-  // Submit
-  document.getElementById('auth-submit-btn')?.addEventListener('click', ()=>{
-    const name = document.getElementById('auth-name-input')?.value.trim();
-    if (!name) {
-      document.getElementById('auth-name-input')?.classList.add('error');
-      setTimeout(()=>document.getElementById('auth-name-input')?.classList.remove('error'), 1500);
-      return;
+  function showError(elId, msg) {
+    const el = document.getElementById(elId);
+    if (el) { el.textContent = msg; el.style.display = ''; }
+  }
+  function hideError(elId) {
+    const el = document.getElementById(elId);
+    if (el) el.style.display = 'none';
+  }
+  function setLoading(btnId, loading) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.innerHTML = loading
+      ? `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Загрузка…':'Yuklanmoqda…'}`
+      : btn._origHtml || btn.innerHTML;
+    if (!loading && !btn._origHtml) btn._origHtml = btn.innerHTML;
+  }
+
+  async function finishAuth(userData, token) {
+    setAuthToken(token);
+    saveUser(userData);
+    overlay.remove();
+    // Sync data from server
+    toast(LANG==='ru'?`Добро пожаловать, ${userData.name}!`:`Xush kelibsiz, ${userData.name}!`, 'success');
+    await syncQuizzesFromServer();
+    await syncHistoryFromServer();
+    if (afterAuth) afterAuth();
+    else renderApp();
+  }
+
+  // ── Social submit ──
+  document.getElementById('social-submit-btn')?.addEventListener('click', async () => {
+    const name = document.getElementById('social-name-input')?.value.trim();
+    const email = document.getElementById('social-email-input')?.value.trim() || null;
+    if (!name) { showError('social-auth-error', LANG==='ru'?'Введите имя':'Ismingizni kiriting'); return; }
+    hideError('social-auth-error');
+    setLoading('social-submit-btn', true);
+    const avatarEmoji = selectedAvatar;
+    const r = await API.social(currentProvider, name, email, avatarEmoji);
+    setLoading('social-submit-btn', false);
+    if (r.ok) {
+      await finishAuth(r.data.user, r.data.token);
+    } else {
+      showError('social-auth-error', r.data.error || (LANG==='ru'?'Ошибка входа':'Kirish xatosi'));
     }
-    const user = { name, avatar: selectedAvatar, provider: authProvider };
-    saveUser(user);
-    overlay.remove();
-    if (afterAuth) afterAuth();
-    else renderApp();
   });
 
-  // Enter key
-  document.getElementById('auth-name-input')?.addEventListener('keydown', e=>{
-    if (e.key==='Enter') document.getElementById('auth-submit-btn')?.click();
+  document.getElementById('social-name-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('social-submit-btn')?.click();
   });
 
-  // Skip
-  document.getElementById('auth-skip-link')?.addEventListener('click', ()=>{
-    const user = { name: LANG==='ru'?'Гость':'Mehmon', avatar: '👤', provider: 'guest' };
-    saveUser(user);
-    overlay.remove();
-    if (afterAuth) afterAuth();
-    else renderApp();
+  // ── Email login submit ──
+  document.getElementById('login-submit-btn')?.addEventListener('click', async () => {
+    const email = document.getElementById('login-email')?.value.trim();
+    const password = document.getElementById('login-password')?.value;
+    if (!email || !password) { showError('login-error', LANG==='ru'?'Заполните все поля':'Barcha maydonlarni to\'ldiring'); return; }
+    hideError('login-error');
+    setLoading('login-submit-btn', true);
+    const r = await API.login(email, password);
+    setLoading('login-submit-btn', false);
+    if (r.ok) {
+      await finishAuth(r.data.user, r.data.token);
+    } else {
+      const msg = r.data.error === 'not_found'
+        ? (LANG==='ru'?'Аккаунт не найден. Зарегистрируйтесь.':'Akkaunt topilmadi.')
+        : r.data.error === 'wrong_password'
+          ? (LANG==='ru'?'Неверный пароль':'Noto\'g\'ri parol')
+          : (LANG==='ru'?'Ошибка входа':'Kirish xatosi');
+      showError('login-error', msg);
+    }
+  });
+
+  ['login-email','login-password'].forEach(id => {
+    document.getElementById(id)?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('login-submit-btn')?.click();
+    });
+  });
+
+  // ── Register submit ──
+  document.getElementById('reg-submit-btn')?.addEventListener('click', async () => {
+    const name = document.getElementById('reg-name')?.value.trim();
+    const email = document.getElementById('reg-email')?.value.trim();
+    const pass = document.getElementById('reg-password')?.value;
+    const pass2 = document.getElementById('reg-password2')?.value;
+    if (!name) { showError('reg-error', LANG==='ru'?'Введите имя':'Ismingizni kiriting'); return; }
+    if (!email) { showError('reg-error', LANG==='ru'?'Введите email':'Email kiriting'); return; }
+    if (!pass || pass.length < 6) { showError('reg-error', LANG==='ru'?'Пароль минимум 6 символов':'Parol kamida 6 belgi'); return; }
+    if (pass !== pass2) { showError('reg-error', LANG==='ru'?'Пароли не совпадают':'Parollar mos kelmaydi'); return; }
+    hideError('reg-error');
+    setLoading('reg-submit-btn', true);
+    const r = await API.register(name, email, pass, selectedAvatar, 'email');
+    setLoading('reg-submit-btn', false);
+    if (r.ok) {
+      await finishAuth(r.data.user, r.data.token);
+    } else {
+      const msg = r.data.error === 'email_taken'
+        ? (LANG==='ru'?'Этот email уже занят':'Bu email band')
+        : (r.data.error || (LANG==='ru'?'Ошибка регистрации':'Ro\'yxatdan o\'tish xatosi'));
+      showError('reg-error', msg);
+    }
+  });
+
+  // ── Go-to links ──
+  document.getElementById('goto-register')?.addEventListener('click', () => {
+    overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
+    overlay.querySelector('[data-tab="register"]')?.classList.add('active');
+    overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
+    document.getElementById('auth-panel-register').style.display = '';
+  });
+  document.getElementById('goto-login')?.addEventListener('click', () => {
+    overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
+    overlay.querySelector('[data-tab="email"]')?.classList.add('active');
+    overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
+    document.getElementById('auth-panel-email').style.display = '';
+  });
+
+  // ── Guest ──
+  document.getElementById('auth-skip-link')?.addEventListener('click', async () => {
+    const r = await API.guest(LANG==='ru'?'Гость':'Mehmon');
+    if (r.ok) {
+      await finishAuth(r.data.user, r.data.token);
+    } else {
+      // Fallback to local
+      const user = { name: LANG==='ru'?'Гость':'Mehmon', avatar:'👤', provider:'guest' };
+      saveUser(user);
+      overlay.remove();
+      if (afterAuth) afterAuth(); else renderApp();
+    }
   });
 }
+
 
 // ═══════════════════════════════════════════════════════════════
 // FIND QUIZ BY CODE/PIN
@@ -2591,25 +2901,27 @@ function attachFindQuizEvents() {
   const pinInput  = document.getElementById('find-pin-input');
   const btn       = document.getElementById('find-quiz-btn');
   const errMsg    = document.getElementById('find-error-msg');
+  const errText   = document.getElementById('find-error-text');
+
+  if (!codeInput || !pinInput || !btn) return;
 
   // Auto-format: digits only
   [codeInput, pinInput].forEach(inp=>{
-    if (!inp) return;
     inp.addEventListener('input', ()=>{
       inp.value = inp.value.replace(/\D/g,'');
     });
     inp.addEventListener('keydown', e=>{
-      if (e.key==='Enter') btn?.click();
+      if (e.key==='Enter') btn.click();
     });
   });
   // Auto-jump: after 6 digits go to PIN
-  codeInput?.addEventListener('input', ()=>{
-    if (codeInput.value.length === 6) pinInput?.focus();
+  codeInput.addEventListener('input', ()=>{
+    if (codeInput.value.length === 6) pinInput.focus();
   });
 
-  btn?.addEventListener('click', ()=>{
-    const code = codeInput?.value.trim() || '';
-    const pin  = pinInput?.value.trim()  || '';
+  btn.addEventListener('click', async ()=>{
+    const code = codeInput.value.trim();
+    const pin  = pinInput.value.trim();
     errMsg.classList.remove('visible');
     codeInput.classList.remove('error');
     pinInput.classList.remove('error');
@@ -2617,21 +2929,60 @@ function attachFindQuizEvents() {
     if (code.length < 6) { codeInput.classList.add('error'); codeInput.focus(); return; }
     if (pin.length  < 4) { pinInput.classList.add('error');  pinInput.focus();  return; }
 
-    const quiz = findQuizByCodePin(code, pin);
-    if (!quiz) {
-      codeInput.classList.add('error');
-      pinInput.classList.add('error');
-      errMsg.classList.add('visible');
+    // Show loading state
+    btn.disabled = true;
+    const origHtml = btn.innerHTML;
+    btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Поиск…':'Qidirilmoqda…'}`;
+
+    // 1. Try server first
+    const r = await API.findByCodePin(code, pin);
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
+
+    if (r.ok && r.data.quiz) {
+      const serverQuiz = r.data.quiz;
+      // Add or update in local state
+      const existingIdx = state.quizzes.findIndex(q => q.id === serverQuiz.id);
+      if (existingIdx >= 0) {
+        state.quizzes[existingIdx] = serverQuiz;
+      } else {
+        state.quizzes.unshift(serverQuiz);
+      }
+      saveStorage(STORAGE.QUIZZES, state.quizzes);
+      // Auth check
+      if (!state.user) {
+        showAuthScreen(() => startQuiz(serverQuiz.id));
+      } else {
+        startQuiz(serverQuiz.id);
+      }
       return;
     }
-    startQuiz(quiz.id);
+
+    // 2. Fallback: check local storage
+    const localQuiz = findQuizByCodePin(code, pin);
+    if (localQuiz) {
+      if (!state.user) {
+        showAuthScreen(() => startQuiz(localQuiz.id));
+      } else {
+        startQuiz(localQuiz.id);
+      }
+      return;
+    }
+
+    // 3. Not found
+    codeInput.classList.add('error');
+    pinInput.classList.add('error');
+    if (errText) errText.textContent = LANG==='ru'
+      ? 'Тест не найден. Проверьте код и PIN.'
+      : 'Test topilmadi. Kod va PIN-ni tekshiring.';
+    errMsg.classList.add('visible');
   });
 }
 
 // ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
-function init() {
+async function init() {
   // 1. Normalise existing quizzes — add codes if missing
   let changed = false;
   state.quizzes.forEach(q => {
@@ -2639,22 +2990,38 @@ function init() {
   });
   if (changed) saveStorage(STORAGE.QUIZZES, state.quizzes);
 
-  // 2. Check for ?q= (base64 embedded quiz in URL)
+  // 2. Restore session from server if we have a token
+  const token = getAuthToken();
+  if (token && !state.user) {
+    const meResult = await API.me();
+    if (meResult.ok) {
+      saveUser(meResult.data.user);
+    } else {
+      // Token expired/invalid — clear it
+      setAuthToken(null);
+    }
+  }
+
+  // 3. Sync quizzes and history from server
+  if (getAuthToken()) {
+    await syncQuizzesFromServer();
+    syncHistoryFromServer(); // background
+  }
+
+  // 4. Check for ?q= (base64 embedded quiz in URL)
   const params = new URLSearchParams(location.search);
   const b64Param = params.get('q');
   if (b64Param) {
     const imported = importQuizFromUrl(b64Param);
     if (imported) {
-      // Check if we already have this quiz (by code)
       const existing = state.quizzes.find(q=>q.code===imported.code);
       const quizToUse = existing || imported;
       if (!existing) {
         state.quizzes.unshift(imported);
         saveStorage(STORAGE.QUIZZES, state.quizzes);
+        pushQuizToServer(imported);
       }
-      // Clear URL param without reload
       history.replaceState({}, '', location.pathname);
-      // Show auth if needed, then launch quiz
       if (!state.user) {
         showAuthScreen(()=> startQuiz(quizToUse.id));
       } else {
@@ -2664,7 +3031,7 @@ function init() {
     }
   }
 
-  // 3. Legacy ?quiz=id param
+  // 5. Legacy ?quiz=id param
   const legacyId = params.get('quiz');
   if (legacyId) {
     const found = state.quizzes.find(q=>q.id===legacyId);
@@ -2676,41 +3043,44 @@ function init() {
     }
   }
 
-  // 4. ?code=XXX&pin=YYYY direct link
+  // 6. ?code=XXX&pin=YYYY direct link
   const urlCode = params.get('code');
   const urlPin  = params.get('pin');
   if (urlCode && urlPin) {
     history.replaceState({}, '', location.pathname);
+    // Try server first
+    const sr = await API.findByCodePin(urlCode, urlPin);
+    if (sr.ok && sr.data.quiz) {
+      const sq = sr.data.quiz;
+      const ei = state.quizzes.findIndex(q=>q.id===sq.id);
+      if (ei>=0) state.quizzes[ei]=sq; else state.quizzes.unshift(sq);
+      saveStorage(STORAGE.QUIZZES, state.quizzes);
+      if (!state.user) { showAuthScreen(()=>startQuiz(sq.id)); }
+      else startQuiz(sq.id);
+      return;
+    }
+    // Fallback: local
     const foundByCode = findQuizByCodePin(urlCode, urlPin);
     if (foundByCode) {
       if (!state.user) { showAuthScreen(()=>startQuiz(foundByCode.id)); }
       else startQuiz(foundByCode.id);
       return;
     }
-    // Not in local storage — show home with pre-filled search
-    if (!state.user) {
-      showAuthScreen(()=>{
-        renderApp();
-        setTimeout(()=>{
-          const ci = document.getElementById('find-code-input');
-          const pi = document.getElementById('find-pin-input');
-          if (ci) { ci.value = urlCode; }
-          if (pi) { pi.value = urlPin; document.getElementById('find-quiz-btn')?.click(); }
-        }, 300);
-      });
-    } else {
+    // Pre-fill search widget
+    const afterLoad = () => {
       renderApp();
       setTimeout(()=>{
         const ci = document.getElementById('find-code-input');
         const pi = document.getElementById('find-pin-input');
-        if (ci) { ci.value = urlCode; }
+        if (ci) ci.value = urlCode;
         if (pi) { pi.value = urlPin; document.getElementById('find-quiz-btn')?.click(); }
-      }, 300);
-    }
+      }, 400);
+    };
+    if (!state.user) { showAuthScreen(afterLoad); } else { afterLoad(); }
     return;
   }
 
-  // 5. Show auth if first time
+  // 7. Show auth if first time
   if (!state.user) {
     showAuthScreen(()=>renderApp());
     return;
