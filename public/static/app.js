@@ -298,8 +298,21 @@ async function syncHistoryFromServer() {
   saveStorage(STORAGE.HISTORY, state.history);
 }
 
+// ─── Push ALL local quizzes to server (one-time migration) ────
+async function pushAllLocalQuizzesToServer() {
+  if (!getAuthToken()) return;
+  const localQuizzes = state.quizzes.filter(q => q.questions && q.questions.length > 0);
+  if (!localQuizzes.length) return;
+  // Push in parallel (max 5 at a time to avoid overwhelming)
+  const chunks = [];
+  for (let i = 0; i < localQuizzes.length; i += 5) chunks.push(localQuizzes.slice(i, i+5));
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async q => {
+      try { await API.saveQuiz(q); } catch(e) {}
+    }));
+  }
+}
 
-// ───── STATE ──────────────────────────────────────────────────
 let state = {
   page: 'home',
   quizzes: loadStorage(STORAGE.QUIZZES, getDefaultQuizzes()),
@@ -596,6 +609,7 @@ function renderHome() {
   if (!area) return;
   if (titleEl) titleEl.textContent = t('home');
   if (actionsEl) actionsEl.innerHTML = `
+    ${state.user ? `<button class="btn btn-secondary btn-sm" id="btn-sync-quizzes" title="${LANG==='ru'?'Синхронизировать тесты с сервером':'Testlarni server bilan sinxronlashtirish'}"><i class="fas fa-cloud-upload-alt"></i></button>` : ''}
     <button class="btn btn-primary" id="btn-create-home"><i class="fas fa-plus"></i> ${t('createQuiz')}</button>`;
 
   const totalQ = state.quizzes.reduce((s,q)=>s+(q.questions?.length||0),0);
@@ -664,6 +678,15 @@ ${recentQuizzes.length ? `
   document.getElementById('hero-create')?.addEventListener('click', ()=>navigate('create-quiz'));
   document.getElementById('hero-browse')?.addEventListener('click', ()=>navigate('my-quizzes'));
   document.getElementById('btn-create-home')?.addEventListener('click', ()=>navigate('create-quiz'));
+  // Sync button — push all local quizzes to server
+  document.getElementById('btn-sync-quizzes')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-sync-quizzes');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; }
+    await pushAllLocalQuizzesToServer();
+    await syncQuizzesFromServer();
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i>'; }
+    toast(LANG==='ru'?'Тесты синхронизированы с сервером':'Testlar server bilan sinxronlandi', 'success');
+  });
   document.getElementById('btn-all-quizzes')?.addEventListener('click', ()=>navigate('my-quizzes'));
   attachFindQuizEvents();
   document.querySelectorAll('[data-feature-action]').forEach(el=>{
@@ -740,6 +763,7 @@ function renderMyQuizzes() {
   if (!area) return;
   if (titleEl) titleEl.textContent = t('myQuizzes');
   if (actionsEl) actionsEl.innerHTML = `
+    ${state.user ? `<button class="btn btn-secondary btn-sm" id="btn-sync-mq" title="${LANG==='ru'?'Синхронизировать тесты':'Sinxronlashtirish'}"><i class="fas fa-cloud-upload-alt"></i> ${LANG==='ru'?'Синхронизировать':'Sinxron'}</button>` : `<button class="btn btn-warning btn-sm" id="btn-login-mq"><i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти для синхронизации':'Kirish'}</button>`}
     <button class="btn btn-primary" id="btn-create-mq"><i class="fas fa-plus"></i> ${t('createQuiz')}</button>
     <button class="btn btn-secondary" id="btn-import-mq"><i class="fas fa-file-import"></i> ${t('importQuestions')}</button>`;
 
@@ -768,6 +792,20 @@ function renderMyQuizzes() {
   document.getElementById('btn-create-mq')?.addEventListener('click',()=>navigate('create-quiz'));
   document.getElementById('btn-import-mq')?.addEventListener('click', showImportModal);
   document.getElementById('btn-empty-create')?.addEventListener('click',()=>navigate('create-quiz'));
+  // Sync button — push all local quizzes to server
+  document.getElementById('btn-sync-mq')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btn-sync-mq');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; }
+    await pushAllLocalQuizzesToServer();
+    await syncQuizzesFromServer();
+    if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fas fa-cloud-upload-alt"></i> ${LANG==='ru'?'Синхронизировать':'Sinxron'}`; }
+    toast(LANG==='ru'?'Тесты синхронизированы с сервером':'Testlar server bilan sinxronlandi', 'success');
+    renderMyQuizzes();
+  });
+  // Login button for non-authenticated users
+  document.getElementById('btn-login-mq')?.addEventListener('click', () => {
+    showAuthScreen(() => { pushAllLocalQuizzesToServer(); renderMyQuizzes(); });
+  });
   attachQuizCardEvents();
   // Search filter
   const search = document.getElementById('quiz-search');
@@ -1330,14 +1368,23 @@ function saveQuizEditor() {
   if (idx>=0) state.quizzes[idx] = quiz;
   else state.quizzes.unshift(quiz);
   saveStorage(STORAGE.QUIZZES, state.quizzes);
-  toast(t('savedSuccess'), 'success');
+
   // Push to server in background
-  pushQuizToServer(quiz).then(serverQuiz => {
-    if (serverQuiz && serverQuiz.id) {
-      const i = state.quizzes.findIndex(q=>q.id===serverQuiz.id);
-      if (i>=0) { state.quizzes[i] = serverQuiz; saveStorage(STORAGE.QUIZZES, state.quizzes); }
-    }
-  });
+  if (getAuthToken()) {
+    pushQuizToServer(quiz).then(serverQuiz => {
+      if (serverQuiz && serverQuiz.id) {
+        const i = state.quizzes.findIndex(q=>q.id===serverQuiz.id);
+        if (i>=0) { state.quizzes[i] = serverQuiz; saveStorage(STORAGE.QUIZZES, state.quizzes); }
+      }
+    });
+    toast(t('savedSuccess'), 'success');
+  } else {
+    // Not logged in — saved locally, prompt to login for server sync
+    toast(LANG==='ru'
+      ? '✅ Сохранено локально. Войдите в аккаунт чтобы тест был доступен по коду с любого устройства.'
+      : '✅ Mahalliy saqlandi. Boshqa qurilmalardan kod bilan topish uchun akkauntga kiring.',
+      'warning', 5000);
+  }
   navigate('my-quizzes');
 }
 
@@ -2573,12 +2620,34 @@ window.onBackdropClick = function(e) {
 
 // ═══════════════════════════════════════════════════════════════
 // AUTH SCREEN — реальная авторизация через backend API
+// Google Identity Services для реального выбора аккаунта Google
 // ═══════════════════════════════════════════════════════════════
 const AVATARS = ['🧑','👩','👨','🧒','👧','👦','🧑‍💻','👩‍💻','👨‍🎓','👩‍🎓','🦸','🦹'];
 let selectedAvatar = AVATARS[0];
 
+// Google OAuth: используем One Tap / Sign In With Google если доступен,
+// иначе показываем форму с email
+function loadGoogleGSI() {
+  if (window._gsiLoaded) return Promise.resolve();
+  if (document.getElementById('gsi-script')) {
+    return new Promise((resolve, reject) => {
+      const el = document.getElementById('gsi-script');
+      el.onload = () => { window._gsiLoaded = true; resolve(); };
+      el.onerror = reject;
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.id = 'gsi-script';
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true; s.defer = true;
+    s.onload = () => { window._gsiLoaded = true; resolve(); };
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
 function showAuthScreen(afterAuth) {
-  // Remove any existing overlay
   document.getElementById('auth-overlay')?.remove();
 
   const overlay = document.createElement('div');
@@ -2593,21 +2662,23 @@ function showAuthScreen(afterAuth) {
 
       <!-- TAB switcher -->
       <div class="auth-tabs" id="auth-tabs">
-        <button class="auth-tab active" data-tab="social">${LANG==='ru'?'Войти':'Kirish'}</button>
-        <button class="auth-tab" data-tab="email">${LANG==='ru'?'Email':'Email'}</button>
-        <button class="auth-tab" data-tab="register">${LANG==='ru'?'Регистрация':'Ro\'yxatdan o\'tish'}</button>
+        <button class="auth-tab active" data-tab="social">${LANG==='ru'?'Соцсети':'Ijtimoiy'}</button>
+        <button class="auth-tab" data-tab="email">${LANG==='ru'?'Вход':'Kirish'}</button>
+        <button class="auth-tab" data-tab="register">${LANG==='ru'?'Регистрация':'Ro\'yxat'}</button>
       </div>
 
-      <!-- SOCIAL / QUICK LOGIN tab -->
+      <!-- ══ SOCIAL tab ══ -->
       <div class="auth-panel" id="auth-panel-social">
-        <div class="auth-title">${LANG==='ru'?'Добро пожаловать!':'Xush kelibsiz!'}</div>
-        <div class="auth-subtitle">${LANG==='ru'?'Войдите через социальную сеть или выберите имя':'Ijtimoiy tarmoq orqali kiring'}</div>
+        <div class="auth-subtitle" style="margin-bottom:14px;">${LANG==='ru'?'Выберите способ входа и введите ваши данные':'Kirish usulini tanlang va ma\'lumotlaringizni kiriting'}</div>
 
-        <button class="social-btn social-google" data-provider="google">
+        <!-- Google — показываем форму с email -->
+        <button class="social-btn social-google" id="btn-google-real" data-provider="google">
           <span class="social-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
-          <span class="social-label">${LANG==='ru'?'Продолжить с Google':'Google orqali kirish'}</span>
+          <span class="social-label">${LANG==='ru'?'Войти через Google':'Google orqali kirish'}</span>
           <i class="fas fa-arrow-right social-arrow"></i>
         </button>
+
+        <!-- Другие провайдеры — вводим имя + email -->
         <button class="social-btn social-facebook" data-provider="facebook">
           <span class="social-icon"><i class="fab fa-facebook-f" style="color:#1877f2"></i></span>
           <span class="social-label">${LANG==='ru'?'Продолжить с Facebook':'Facebook orqali kirish'}</span>
@@ -2624,16 +2695,16 @@ function showAuthScreen(afterAuth) {
           <i class="fas fa-arrow-right social-arrow"></i>
         </button>
 
-        <!-- Social name prompt (shown after clicking provider) -->
+        <!-- Форма для Google/Facebook/Apple/WhatsApp -->
         <div id="social-name-section" style="display:none;margin-top:14px;">
-          <div class="auth-divider">${LANG==='ru'?'Введите ваше имя':'Ismingizni kiriting'}</div>
+          <div class="auth-divider" id="social-provider-divider">${LANG==='ru'?'Введите данные для Facebook':'Facebook ma\'lumotlarini kiriting'}</div>
           <div class="auth-avatar-row" id="social-avatar-row">
             ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
           </div>
           <input class="auth-name-input" id="social-name-input" type="text" maxlength="40"
-            placeholder="${LANG==='ru'?'Ваше имя или никнейм…':'Ismingiz…'}">
+            placeholder="${LANG==='ru'?'Ваше имя *':'Ismingiz *'}">
           <input class="auth-name-input" id="social-email-input" type="email" maxlength="100"
-            placeholder="${LANG==='ru'?'Email (необязательно)':'Email (ixtiyoriy)'}" style="margin-top:8px;">
+            placeholder="${LANG==='ru'?'Email *':'Email *'}" style="margin-top:8px;" required>
           <div id="social-auth-error" class="auth-error" style="display:none"></div>
           <button class="auth-submit-btn" id="social-submit-btn">
             <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
@@ -2645,36 +2716,44 @@ function showAuthScreen(afterAuth) {
         </div>
       </div>
 
-      <!-- EMAIL LOGIN tab -->
+      <!-- ══ EMAIL LOGIN tab ══ -->
       <div class="auth-panel" id="auth-panel-email" style="display:none">
         <div class="auth-title">${LANG==='ru'?'Вход по Email':'Email orqali kirish'}</div>
-        <div class="auth-subtitle">${LANG==='ru'?'Введите email и пароль':'Email va parolingizni kiriting'}</div>
-        <input class="auth-name-input" id="login-email" type="email" placeholder="Email" autocomplete="email">
-        <input class="auth-name-input" id="login-password" type="password" placeholder="${LANG==='ru'?'Пароль':'Parol'}" style="margin-top:8px;" autocomplete="current-password">
-        <div id="login-error" class="auth-error" style="display:none"></div>
-        <button class="auth-submit-btn" id="login-submit-btn">
-          <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
-        </button>
+        <div class="auth-subtitle">${LANG==='ru'?'Введите email и пароль':'Email va parolni kiriting'}</div>
+        <form id="login-form" autocomplete="on" onsubmit="return false">
+          <input class="auth-name-input" id="login-email" type="email" placeholder="Email *" autocomplete="email" required>
+          <input class="auth-name-input" id="login-password" type="password" placeholder="${LANG==='ru'?'Пароль *':'Parol *'}" style="margin-top:8px;" autocomplete="current-password" required>
+          <div id="login-error" class="auth-error" style="display:none"></div>
+          <button class="auth-submit-btn" id="login-submit-btn" type="submit">
+            <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
+          </button>
+        </form>
         <div class="auth-skip" style="margin-top:10px;">
           <a id="goto-register">${LANG==='ru'?'Нет аккаунта? Зарегистрироваться':'Akkaunt yo\'qmi? Ro\'yxatdan o\'ting'}</a>
         </div>
       </div>
 
-      <!-- REGISTER tab -->
+      <!-- ══ REGISTER tab ══ -->
       <div class="auth-panel" id="auth-panel-register" style="display:none">
         <div class="auth-title">${LANG==='ru'?'Создать аккаунт':'Akkaunt yaratish'}</div>
-        <div class="auth-subtitle">${LANG==='ru'?'Тесты будут сохраняться на сервере':'Testlar serverda saqlanadi'}</div>
+        <div class="auth-subtitle">${LANG==='ru'?'Тесты сохраняются на сервере и доступны с любого устройства':'Testlar serverda saqlanib barcha qurilmalardan ochiladi'}</div>
         <div class="auth-avatar-row" id="reg-avatar-row">
           ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
         </div>
-        <input class="auth-name-input" id="reg-name" type="text" maxlength="40" placeholder="${LANG==='ru'?'Ваше имя или никнейм':'Ismingiz'}">
-        <input class="auth-name-input" id="reg-email" type="email" placeholder="Email" style="margin-top:8px;" autocomplete="email">
-        <input class="auth-name-input" id="reg-password" type="password" placeholder="${LANG==='ru'?'Пароль (мин. 6 символов)':'Parol (kamida 6 belgi)'}" style="margin-top:8px;" autocomplete="new-password">
-        <input class="auth-name-input" id="reg-password2" type="password" placeholder="${LANG==='ru'?'Повторите пароль':'Parolni takrorlang'}" style="margin-top:8px;" autocomplete="new-password">
-        <div id="reg-error" class="auth-error" style="display:none"></div>
-        <button class="auth-submit-btn" id="reg-submit-btn">
-          <i class="fas fa-user-plus"></i> ${LANG==='ru'?'Зарегистрироваться':'Ro\'yxatdan o\'tish'}
-        </button>
+        <form id="reg-form" autocomplete="on" onsubmit="return false">
+          <input class="auth-name-input" id="reg-name" type="text" maxlength="40"
+            placeholder="${LANG==='ru'?'Имя или никнейм *':'Ism yoki taxallus *'}" autocomplete="name" required>
+          <input class="auth-name-input" id="reg-email" type="email"
+            placeholder="Email *" style="margin-top:8px;" autocomplete="email" required>
+          <input class="auth-name-input" id="reg-password" type="password"
+            placeholder="${LANG==='ru'?'Пароль (мин. 6 символов) *':'Parol (kamida 6 belgi) *'}" style="margin-top:8px;" autocomplete="new-password" required minlength="6">
+          <input class="auth-name-input" id="reg-password2" type="password"
+            placeholder="${LANG==='ru'?'Повторите пароль *':'Parolni takrorlang *'}" style="margin-top:8px;" autocomplete="new-password" required>
+          <div id="reg-error" class="auth-error" style="display:none"></div>
+          <button class="auth-submit-btn" id="reg-submit-btn" type="submit">
+            <i class="fas fa-user-plus"></i> ${LANG==='ru'?'Зарегистрироваться':'Ro\'yxatdan o\'tish'}
+          </button>
+        </form>
         <div class="auth-skip" style="margin-top:10px;">
           <a id="goto-login">${LANG==='ru'?'Уже есть аккаунт? Войти':'Allaqon akkauntingiz bormi? Kiring'}</a>
         </div>
@@ -2684,28 +2763,75 @@ function showAuthScreen(afterAuth) {
   document.body.appendChild(overlay);
 
   // ── Tab switching ──
+  function switchTab(tabName) {
+    overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
+    overlay.querySelector(`[data-tab="${tabName}"]`)?.classList.add('active');
+    overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
+    const panel = document.getElementById('auth-panel-' + tabName);
+    if (panel) panel.style.display = '';
+  }
   overlay.querySelectorAll('.auth-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
-      tab.classList.add('active');
-      overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
-      const panel = document.getElementById('auth-panel-' + tab.dataset.tab);
-      if (panel) panel.style.display = '';
-    });
+    tab.addEventListener('click', () => switchTab(tab.dataset.tab));
   });
 
-  // ── Social login ──
-  let currentProvider = 'email';
-  overlay.querySelectorAll('.social-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      currentProvider = btn.dataset.provider;
-      overlay.querySelectorAll('.social-btn').forEach(b => { b.style.opacity='0.5'; b.style.borderColor=''; });
-      btn.style.opacity = '1';
-      btn.style.borderColor = 'var(--primary)';
-      const nameSection = document.getElementById('social-name-section');
-      if (nameSection) nameSection.style.display = '';
-      document.getElementById('social-name-input')?.focus();
-    });
+  // ── Helper functions ──
+  function showError(elId, msg) {
+    const el = document.getElementById(elId);
+    if (el) { el.textContent = msg; el.style.display = ''; }
+  }
+  function hideError(elId) {
+    const el = document.getElementById(elId);
+    if (el) el.style.display = 'none';
+  }
+  function setLoading(btnId, loading, origLabel) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.disabled = loading;
+    if (loading) {
+      btn._origHtml = btn.innerHTML;
+      btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Загрузка…':'Yuklanmoqda…'}`;
+    } else if (btn._origHtml) {
+      btn.innerHTML = btn._origHtml;
+    }
+  }
+
+  async function finishAuth(userData, token) {
+    setAuthToken(token);
+    saveUser(userData);
+    overlay.remove();
+    toast(LANG==='ru'?`Добро пожаловать, ${userData.name}!`:`Xush kelibsiz, ${userData.name}!`, 'success');
+    // First push all local quizzes to server (so they become searchable)
+    await pushAllLocalQuizzesToServer();
+    // Then sync from server (merge)
+    await syncQuizzesFromServer();
+    syncHistoryFromServer();
+    if (afterAuth) afterAuth();
+    else renderApp();
+  }
+
+  // ══════════════════════════════════════════════
+  // Все социальные кнопки (Google/Facebook/Apple/WhatsApp) — открывают форму с именем + email
+  // ══════════════════════════════════════════════
+  let currentProvider = 'google';
+
+  function showSocialForm(provider) {
+    const names = { google:'Google', facebook:'Facebook', apple:'Apple', whatsapp:'WhatsApp' };
+    const sec = document.getElementById('social-name-section');
+    const divider = document.getElementById('social-provider-divider');
+    if (divider) divider.textContent = LANG==='ru'
+      ? `Введите данные для ${names[provider]}`
+      : `${names[provider]} ma'lumotlarini kiriting`;
+    currentProvider = provider;
+    overlay.querySelectorAll('.social-btn').forEach(b => { b.style.opacity='0.5'; b.style.borderColor=''; });
+    const activeBtn = overlay.querySelector(`.social-btn[data-provider="${provider}"]`);
+    if (activeBtn) { activeBtn.style.opacity='1'; activeBtn.style.borderColor='var(--primary)'; }
+    if (sec) sec.style.display = '';
+    hideError('social-auth-error');
+    document.getElementById('social-name-input')?.focus();
+  }
+
+  overlay.querySelectorAll('.social-btn[data-provider]').forEach(btn => {
+    btn.addEventListener('click', () => showSocialForm(btn.dataset.provider));
   });
 
   // Avatar selection (social tab)
@@ -2726,45 +2852,16 @@ function showAuthScreen(afterAuth) {
     });
   });
 
-  function showError(elId, msg) {
-    const el = document.getElementById(elId);
-    if (el) { el.textContent = msg; el.style.display = ''; }
-  }
-  function hideError(elId) {
-    const el = document.getElementById(elId);
-    if (el) el.style.display = 'none';
-  }
-  function setLoading(btnId, loading) {
-    const btn = document.getElementById(btnId);
-    if (!btn) return;
-    btn.disabled = loading;
-    btn.innerHTML = loading
-      ? `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Загрузка…':'Yuklanmoqda…'}`
-      : btn._origHtml || btn.innerHTML;
-    if (!loading && !btn._origHtml) btn._origHtml = btn.innerHTML;
-  }
-
-  async function finishAuth(userData, token) {
-    setAuthToken(token);
-    saveUser(userData);
-    overlay.remove();
-    // Sync data from server
-    toast(LANG==='ru'?`Добро пожаловать, ${userData.name}!`:`Xush kelibsiz, ${userData.name}!`, 'success');
-    await syncQuizzesFromServer();
-    await syncHistoryFromServer();
-    if (afterAuth) afterAuth();
-    else renderApp();
-  }
-
-  // ── Social submit ──
+  // ── Social submit (Facebook/Apple/WhatsApp/Google-fallback) ──
   document.getElementById('social-submit-btn')?.addEventListener('click', async () => {
     const name = document.getElementById('social-name-input')?.value.trim();
-    const email = document.getElementById('social-email-input')?.value.trim() || null;
+    const email = document.getElementById('social-email-input')?.value.trim();
     if (!name) { showError('social-auth-error', LANG==='ru'?'Введите имя':'Ismingizni kiriting'); return; }
+    if (!email) { showError('social-auth-error', LANG==='ru'?'Email обязателен':'Email majburiy'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('social-auth-error', LANG==='ru'?'Введите корректный email':'To\'g\'ri email kiriting'); return; }
     hideError('social-auth-error');
     setLoading('social-submit-btn', true);
-    const avatarEmoji = selectedAvatar;
-    const r = await API.social(currentProvider, name, email, avatarEmoji);
+    const r = await API.social(currentProvider, name, email, selectedAvatar);
     setLoading('social-submit-btn', false);
     if (r.ok) {
       await finishAuth(r.data.user, r.data.token);
@@ -2774,14 +2871,19 @@ function showAuthScreen(afterAuth) {
   });
 
   document.getElementById('social-name-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('social-email-input')?.focus();
+  });
+  document.getElementById('social-email-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') document.getElementById('social-submit-btn')?.click();
   });
 
   // ── Email login submit ──
-  document.getElementById('login-submit-btn')?.addEventListener('click', async () => {
+  document.getElementById('login-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
     const email = document.getElementById('login-email')?.value.trim();
     const password = document.getElementById('login-password')?.value;
-    if (!email || !password) { showError('login-error', LANG==='ru'?'Заполните все поля':'Barcha maydonlarni to\'ldiring'); return; }
+    if (!email) { showError('login-error', LANG==='ru'?'Введите email':'Email kiriting'); return; }
+    if (!password) { showError('login-error', LANG==='ru'?'Введите пароль':'Parol kiriting'); return; }
     hideError('login-error');
     setLoading('login-submit-btn', true);
     const r = await API.login(email, password);
@@ -2790,7 +2892,7 @@ function showAuthScreen(afterAuth) {
       await finishAuth(r.data.user, r.data.token);
     } else {
       const msg = r.data.error === 'not_found'
-        ? (LANG==='ru'?'Аккаунт не найден. Зарегистрируйтесь.':'Akkaunt topilmadi.')
+        ? (LANG==='ru'?'Аккаунт не найден. Зарегистрируйтесь.':'Akkaunt topilmadi. Ro\'yxatdan o\'ting.')
         : r.data.error === 'wrong_password'
           ? (LANG==='ru'?'Неверный пароль':'Noto\'g\'ri parol')
           : (LANG==='ru'?'Ошибка входа':'Kirish xatosi');
@@ -2798,20 +2900,16 @@ function showAuthScreen(afterAuth) {
     }
   });
 
-  ['login-email','login-password'].forEach(id => {
-    document.getElementById(id)?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') document.getElementById('login-submit-btn')?.click();
-    });
-  });
-
   // ── Register submit ──
-  document.getElementById('reg-submit-btn')?.addEventListener('click', async () => {
+  document.getElementById('reg-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
     const name = document.getElementById('reg-name')?.value.trim();
     const email = document.getElementById('reg-email')?.value.trim();
     const pass = document.getElementById('reg-password')?.value;
     const pass2 = document.getElementById('reg-password2')?.value;
     if (!name) { showError('reg-error', LANG==='ru'?'Введите имя':'Ismingizni kiriting'); return; }
-    if (!email) { showError('reg-error', LANG==='ru'?'Введите email':'Email kiriting'); return; }
+    if (!email) { showError('reg-error', LANG==='ru'?'Email обязателен':'Email majburiy'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('reg-error', LANG==='ru'?'Введите корректный email':'To\'g\'ri email kiriting'); return; }
     if (!pass || pass.length < 6) { showError('reg-error', LANG==='ru'?'Пароль минимум 6 символов':'Parol kamida 6 belgi'); return; }
     if (pass !== pass2) { showError('reg-error', LANG==='ru'?'Пароли не совпадают':'Parollar mos kelmaydi'); return; }
     hideError('reg-error');
@@ -2822,25 +2920,15 @@ function showAuthScreen(afterAuth) {
       await finishAuth(r.data.user, r.data.token);
     } else {
       const msg = r.data.error === 'email_taken'
-        ? (LANG==='ru'?'Этот email уже занят':'Bu email band')
+        ? (LANG==='ru'?'Этот email уже занят. Войдите через вкладку "Вход"':'Bu email band. "Kirish" yorlig\'idan kiring')
         : (r.data.error || (LANG==='ru'?'Ошибка регистрации':'Ro\'yxatdan o\'tish xatosi'));
       showError('reg-error', msg);
     }
   });
 
   // ── Go-to links ──
-  document.getElementById('goto-register')?.addEventListener('click', () => {
-    overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
-    overlay.querySelector('[data-tab="register"]')?.classList.add('active');
-    overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
-    document.getElementById('auth-panel-register').style.display = '';
-  });
-  document.getElementById('goto-login')?.addEventListener('click', () => {
-    overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
-    overlay.querySelector('[data-tab="email"]')?.classList.add('active');
-    overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
-    document.getElementById('auth-panel-email').style.display = '';
-  });
+  document.getElementById('goto-register')?.addEventListener('click', () => switchTab('register'));
+  document.getElementById('goto-login')?.addEventListener('click', () => switchTab('email'));
 
   // ── Guest ──
   document.getElementById('auth-skip-link')?.addEventListener('click', async () => {
@@ -2848,7 +2936,6 @@ function showAuthScreen(afterAuth) {
     if (r.ok) {
       await finishAuth(r.data.user, r.data.token);
     } else {
-      // Fallback to local
       const user = { name: LANG==='ru'?'Гость':'Mehmon', avatar:'👤', provider:'guest' };
       saveUser(user);
       overlay.remove();
@@ -2961,6 +3048,8 @@ function attachFindQuizEvents() {
     // 2. Fallback: check local storage
     const localQuiz = findQuizByCodePin(code, pin);
     if (localQuiz) {
+      // Push this quiz to server so others can find it next time
+      pushQuizToServer(localQuiz).catch(()=>{});
       if (!state.user) {
         showAuthScreen(() => startQuiz(localQuiz.id));
       } else {
@@ -3004,6 +3093,8 @@ async function init() {
 
   // 3. Sync quizzes and history from server
   if (getAuthToken()) {
+    // Push all local quizzes to server (so they become searchable by code+PIN)
+    pushAllLocalQuizzesToServer().catch(()=>{});
     await syncQuizzesFromServer();
     syncHistoryFromServer(); // background
   }
