@@ -1,21 +1,77 @@
-```txt
-npm install
-npm run dev
+# QuizMaster — Платформа интерактивных квизов
+
+## Описание
+Современное веб-приложение для создания и прохождения квиз-тестов. Поддерживает три типа вопросов, индикатор прогресса, подсчёт результатов и детальный разбор ошибок.
+
+## Функции
+- ✅ Одиночный выбор ответа (radio)
+- ✅ Множественный выбор (checkbox)
+- ✅ Текстовый ответ (input)
+- ✅ Индикатор прогресса + точки
+- ✅ Таймер (опционально)
+- ✅ Финальный экран с анимацией результата
+- ✅ Разбор правильных/неправильных ответов
+- ✅ Пояснения к ответам
+- ✅ Перезапуск теста
+- ✅ Адаптивный дизайн (мобильный / десктоп)
+- ✅ Защита от XSS, ответы проверяются на сервере
+
+## Как добавить свои вопросы
+
+Откройте файл **`src/questions.ts`** и:
+
+1. Измените `quizConfig` — название, описание, проходной балл
+2. Отредактируйте массив `questions`
+
+### Структура вопроса
+
+```typescript
+{
+  id: 1,                    // уникальный номер
+  type: 'single',           // 'single' | 'multiple' | 'text'
+  question: 'Текст вопроса?',
+  options: ['A', 'B', 'C'], // для single и multiple
+  correct: 'A',             // строка (single/text) или массив (multiple)
+  explanation: 'Пояснение', // необязательно
+}
 ```
 
-```txt
+### Типы вопросов
+
+| Тип | Описание | `correct` |
+|-----|----------|-----------|
+| `single` | Один вариант | строка |
+| `multiple` | Несколько вариантов | массив строк |
+| `text` | Текстовый ввод | строка или массив допустимых ответов |
+
+## Технологии
+- **Backend**: Hono (TypeScript) на Cloudflare Workers
+- **Frontend**: Vanilla JS + CSS анимации
+- **Сборка**: Vite + @hono/vite-build
+- **Шрифты**: Google Fonts (Inter)
+- **Иконки**: Font Awesome 6
+
+## Запуск
+
+```bash
+# Установка зависимостей
+npm install
+
+# Сборка
+npm run build
+
+# Запуск (разработка)
+pm2 start ecosystem.config.cjs
+
+# Деплой на Cloudflare Pages
 npm run deploy
 ```
 
-[For generating/synchronizing types based on your Worker configuration run](https://developers.cloudflare.com/workers/wrangler/commands/#types):
+## API
+- `GET /api/quiz` — данные квиза (без правильных ответов)
+- `POST /api/submit` — проверка ответов `{ answers: { [id]: string | string[] } }`
 
-```txt
-npm run cf-typegen
-```
-
-Pass the `CloudflareBindings` as generics when instantiation `Hono`:
-
-```ts
-// src/index.ts
-const app = new Hono<{ Bindings: CloudflareBindings }>()
-```
+## Деплой
+- **Платформа**: Cloudflare Pages
+- **Статус**: ✅ Готово к деплою
+- **Последнее обновление**: 2026-04-05

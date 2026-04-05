@@ -1,22 +1,149 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/cloudflare-workers'
-import { questions, quizConfig } from './questions'
+import { questions as defaultQuestions, quizConfig as defaultQuizConfig } from './questions'
+import type { Question, QuizConfig } from './questions'
 
 const app = new Hono()
+
+// ─── Хранилище загруженных вопросов (in-memory, per-instance) ───────────────
+// При перезапуске воркера сбрасывается к дефолтным
+let runtimeQuestions: Question[] = defaultQuestions
+let runtimeConfig: QuizConfig = defaultQuizConfig
+
+// ─── Утилита: валидация вопроса ──────────────────────────────────────────────
+function validateQuestion(q: unknown, idx: number): string | null {
+  if (typeof q !== 'object' || q === null) return `Вопрос #${idx + 1}: не объект`
+  const qObj = q as Record<string, unknown>
+  if (typeof qObj.id !== 'number') return `Вопрос #${idx + 1}: поле "id" должно быть числом`
+  if (!['single', 'multiple', 'text'].includes(qObj.type as string))
+    return `Вопрос #${idx + 1}: поле "type" должно быть "single", "multiple" или "text"`
+  if (typeof qObj.question !== 'string' || !qObj.question.trim())
+    return `Вопрос #${idx + 1}: поле "question" должно быть непустой строкой`
+  if (qObj.type !== 'text') {
+    if (!Array.isArray(qObj.options) || qObj.options.length < 2)
+      return `Вопрос #${idx + 1}: поле "options" должно содержать минимум 2 варианта`
+  }
+  if (qObj.correct === undefined || qObj.correct === null)
+    return `Вопрос #${idx + 1}: поле "correct" обязательно`
+  return null
+}
 
 // Отдаём статику
 app.use('/static/*', serveStatic({ root: './' }))
 
 // API: получить данные квиза
 app.get('/api/quiz', (c) => {
-  // Отдаём вопросы без правильных ответов
-  const safeQuestions = questions.map(({ id, type, question, options, explanation: _e }) => ({
+  const safeQuestions = runtimeQuestions.map(({ id, type, question, options }) => ({
     id,
     type,
     question,
     options,
   }))
-  return c.json({ config: quizConfig, questions: safeQuestions })
+  return c.json({ config: runtimeConfig, questions: safeQuestions })
+})
+
+// API: загрузить новый набор вопросов (JSON)
+app.post('/api/upload-quiz', async (c) => {
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ ok: false, error: 'Невалидный JSON' }, 400)
+  }
+
+  const data = body as Record<string, unknown>
+
+  // Принимаем два формата:
+  // 1) { config: {...}, questions: [...] }
+  // 2) просто массив вопросов [...]
+  let newQuestions: unknown[]
+  let newConfig: Partial<QuizConfig> = {}
+
+  if (Array.isArray(data)) {
+    newQuestions = data
+  } else if (Array.isArray(data.questions)) {
+    newQuestions = data.questions
+    if (typeof data.config === 'object' && data.config !== null) {
+      newConfig = data.config as Partial<QuizConfig>
+    }
+  } else {
+    return c.json({ ok: false, error: 'Структура файла неверна. Ожидается массив вопросов или объект { config, questions }' }, 400)
+  }
+
+  if (newQuestions.length === 0) {
+    return c.json({ ok: false, error: 'Список вопросов пустой' }, 400)
+  }
+  if (newQuestions.length > 200) {
+    return c.json({ ok: false, error: 'Максимум 200 вопросов' }, 400)
+  }
+
+  // Валидируем каждый вопрос
+  for (let i = 0; i < newQuestions.length; i++) {
+    const err = validateQuestion(newQuestions[i], i)
+    if (err) return c.json({ ok: false, error: err }, 400)
+  }
+
+  // Применяем
+  runtimeQuestions = newQuestions as Question[]
+  runtimeConfig = {
+    title:        typeof newConfig.title === 'string' ? newConfig.title : defaultQuizConfig.title,
+    description:  typeof newConfig.description === 'string' ? newConfig.description : defaultQuizConfig.description,
+    timeLimit:    typeof newConfig.timeLimit === 'number' ? newConfig.timeLimit : defaultQuizConfig.timeLimit,
+    passingScore: typeof newConfig.passingScore === 'number' ? newConfig.passingScore : defaultQuizConfig.passingScore,
+  }
+
+  return c.json({
+    ok: true,
+    loaded: runtimeQuestions.length,
+    config: runtimeConfig,
+  })
+})
+
+// API: сбросить к дефолтным вопросам
+app.post('/api/reset-quiz', (c) => {
+  runtimeQuestions = defaultQuestions
+  runtimeConfig = defaultQuizConfig
+  return c.json({ ok: true, loaded: runtimeQuestions.length })
+})
+
+// API: скачать шаблон JSON
+app.get('/api/template', (c) => {
+  const template = {
+    config: {
+      title: 'Название вашего квиза',
+      description: 'Краткое описание теста',
+      passingScore: 60,
+      timeLimit: 0,
+    },
+    questions: [
+      {
+        id: 1,
+        type: 'single',
+        question: 'Пример вопроса с одним вариантом ответа?',
+        options: ['Вариант А', 'Вариант Б', 'Вариант В', 'Вариант Г'],
+        correct: 'Вариант А',
+        explanation: 'Пояснение к правильному ответу (необязательно)',
+      },
+      {
+        id: 2,
+        type: 'multiple',
+        question: 'Пример вопроса с несколькими правильными ответами?',
+        options: ['Правильный 1', 'Неправильный', 'Правильный 2', 'Неправильный 2'],
+        correct: ['Правильный 1', 'Правильный 2'],
+        explanation: 'Здесь можно указать несколько правильных ответов',
+      },
+      {
+        id: 3,
+        type: 'text',
+        question: 'Пример вопроса с текстовым ответом (введите ответ)?',
+        correct: ['ответ', 'правильный ответ'],
+        explanation: 'Для текстовых вопросов укажите массив допустимых ответов',
+      },
+    ],
+  }
+  c.header('Content-Type', 'application/json; charset=utf-8')
+  c.header('Content-Disposition', 'attachment; filename="quiz-template.json"')
+  return c.body(JSON.stringify(template, null, 2))
 })
 
 // API: проверить ответы
@@ -27,7 +154,7 @@ app.post('/api/submit', async (c) => {
   let correct = 0
   const results: Record<number, { isCorrect: boolean; correct: string | string[]; explanation?: string }> = {}
 
-  for (const question of questions) {
+  for (const question of runtimeQuestions) {
     const userAnswer = answers[question.id]
     let isCorrect = false
 
@@ -55,9 +182,9 @@ app.post('/api/submit', async (c) => {
 
   return c.json({
     correct,
-    total: questions.length,
-    percentage: Math.round((correct / questions.length) * 100),
-    passed: Math.round((correct / questions.length) * 100) >= quizConfig.passingScore,
+    total: runtimeQuestions.length,
+    percentage: Math.round((correct / runtimeQuestions.length) * 100),
+    passed: Math.round((correct / runtimeQuestions.length) * 100) >= runtimeConfig.passingScore,
     results,
   })
 })
@@ -907,6 +1034,349 @@ app.get('/', (c) => {
       .score-stats { gap: 20px; }
       .result-actions { flex-direction: column; align-items: center; }
     }
+
+    /* ============================================================
+       КНОПКА ЗАГРУЗКИ В ШАПКЕ
+    ============================================================ */
+    .btn-upload-quiz {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      color: var(--primary-dark);
+      background: var(--primary-light);
+      border: 1.5px solid #bfdbfe;
+      border-radius: 9px;
+      cursor: pointer;
+      transition: var(--transition);
+      white-space: nowrap;
+      outline: none;
+    }
+    .btn-upload-quiz:hover {
+      background: #dbeafe;
+      border-color: var(--primary);
+      transform: translateY(-1px);
+      box-shadow: 0 3px 10px rgba(59,130,246,.2);
+    }
+    .btn-upload-quiz i { font-size: 14px; }
+    @media(max-width:480px) {
+      .btn-upload-quiz span { display: none; }
+      .btn-upload-quiz { padding: 8px 10px; }
+    }
+
+    /* ============================================================
+       МОДАЛЬНОЕ ОКНО
+    ============================================================ */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15,23,42,.55);
+      backdrop-filter: blur(6px);
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .25s ease;
+    }
+    .modal-backdrop.open {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .modal {
+      background: var(--card);
+      border-radius: 20px;
+      width: 100%;
+      max-width: 560px;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 24px 60px rgba(0,0,0,.22);
+      transform: translateY(20px) scale(.97);
+      transition: transform .28s cubic-bezier(.4,0,.2,1);
+    }
+    .modal-backdrop.open .modal {
+      transform: translateY(0) scale(1);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 26px 28px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .modal-icon {
+      width: 44px; height: 44px;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+    .modal-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -.3px;
+      color: var(--text);
+    }
+    .modal-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .modal-close {
+      flex-shrink: 0;
+      width: 34px; height: 34px;
+      border-radius: 8px;
+      border: none;
+      background: var(--bg);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 14px;
+      display: flex; align-items: center; justify-content: center;
+      transition: var(--transition);
+      margin-top: 2px;
+    }
+    .modal-close:hover { background: var(--border); color: var(--text); }
+
+    .modal-body {
+      padding: 24px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .modal-footer {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 16px 28px 24px;
+      border-top: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .modal-footer .btn-ghost { margin-right: auto; }
+
+    /* ─── Drag & Drop зона ─── */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 36px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: var(--transition);
+      background: var(--bg);
+      position: relative;
+    }
+    .drop-zone:hover,
+    .drop-zone.drag-over {
+      border-color: var(--primary);
+      background: var(--primary-light);
+    }
+    .drop-zone.drag-over {
+      transform: scale(1.01);
+      box-shadow: 0 0 0 4px rgba(59,130,246,.12);
+    }
+    .drop-zone.has-file {
+      border-style: solid;
+      border-color: var(--success);
+      background: var(--success-light);
+    }
+    .drop-zone-icon {
+      font-size: 40px;
+      color: var(--primary);
+      margin-bottom: 12px;
+      transition: var(--transition);
+    }
+    .drop-zone.drag-over .drop-zone-icon { transform: scale(1.15); }
+    .drop-zone.has-file .drop-zone-icon { color: var(--success); }
+    .drop-zone-text {
+      font-size: 15px;
+      color: var(--text);
+      margin-bottom: 6px;
+      line-height: 1.5;
+    }
+    .dz-link { color: var(--primary); text-decoration: underline; font-weight: 600; }
+    .drop-zone-hint { font-size: 12px; color: var(--text-muted); }
+
+    /* ─── Статус файла ─── */
+    .file-status {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background: var(--success-light);
+      border: 1px solid #a7f3d0;
+      border-radius: var(--radius-sm);
+      animation: fadeInUp .2s ease;
+    }
+    .file-status-icon {
+      width: 38px; height: 38px;
+      background: var(--success);
+      border-radius: 9px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .file-status-info { flex: 1; min-width: 0; }
+    .file-status-name {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .file-status-meta { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+    .file-status-remove {
+      flex-shrink: 0;
+      width: 28px; height: 28px;
+      border: none;
+      background: rgba(0,0,0,.07);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex; align-items: center; justify-content: center;
+      transition: var(--transition);
+    }
+    .file-status-remove:hover { background: var(--danger-light); color: var(--danger); }
+
+    /* ─── Предпросмотр ─── */
+    .preview-block {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      animation: fadeInUp .2s ease;
+    }
+    .preview-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .preview-badge {
+      margin-left: auto;
+      background: var(--primary);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 9px;
+      border-radius: 99px;
+    }
+    .preview-list {
+      max-height: 200px;
+      overflow-y: auto;
+      padding: 8px 0;
+    }
+    .preview-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 16px;
+      transition: background .15s;
+    }
+    .preview-item:hover { background: var(--bg); }
+    .preview-item-num {
+      flex-shrink: 0;
+      width: 22px; height: 22px;
+      background: var(--primary-light);
+      color: var(--primary-dark);
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .preview-item-q {
+      flex: 1;
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.4;
+    }
+    .preview-item-type {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 99px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }
+    .preview-item-type.single   { background: #eff6ff; color: #2563eb; }
+    .preview-item-type.multiple { background: #f5f3ff; color: #7c3aed; }
+    .preview-item-type.text     { background: #ecfdf5; color: #059669; }
+
+    /* ─── Ошибка ─── */
+    .upload-error {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--danger-light);
+      border: 1px solid #fecaca;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      color: #b91c1c;
+      animation: fadeInUp .2s ease;
+      line-height: 1.5;
+    }
+    .upload-error i { flex-shrink: 0; margin-top: 1px; }
+
+    /* ─── Шаблон ─── */
+    .template-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+      color: var(--text-muted);
+      flex-wrap: wrap;
+    }
+    .template-row i { color: var(--primary); }
+    .template-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--primary);
+      font-weight: 600;
+      text-decoration: none;
+      border-bottom: 1px dashed var(--primary);
+      padding-bottom: 1px;
+      transition: var(--transition);
+    }
+    .template-link:hover { color: var(--primary-dark); border-bottom-style: solid; }
+
+    /* ─── Активный квиз индикатор в шапке ─── */
+    .custom-quiz-badge {
+      display: none;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #fff;
+      border-radius: 99px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }
+    .custom-quiz-badge.visible { display: flex; }
   </style>
 </head>
 <body>
@@ -920,19 +1390,119 @@ app.get('/', (c) => {
           <div class="logo-icon"><i class="fas fa-brain"></i></div>
           <span class="logo-text">Quiz<span>Master</span></span>
         </a>
-        <div id="header-progress">
-          <div class="header-prog-bar">
-            <div class="header-prog-fill" id="header-prog-fill" style="width:0%"></div>
+        <div style="display:flex;align-items:center;gap:10px;flex:1;justify-content:center;overflow:hidden">
+          <div id="header-progress">
+            <div class="header-prog-bar">
+              <div class="header-prog-fill" id="header-prog-fill" style="width:0%"></div>
+            </div>
+            <span id="header-prog-text">0 / 0</span>
           </div>
-          <span id="header-prog-text">0 / 0</span>
+          <div class="custom-quiz-badge" id="custom-badge">
+            <i class="fas fa-star"></i> Свой квиз
+          </div>
         </div>
         <div id="timer-display">
           <i class="fas fa-clock"></i>
           <span id="timer-text">--:--</span>
         </div>
+        <button class="btn-upload-quiz" id="btn-open-upload" onclick="openUploadModal()" title="Загрузить вопросы из файла">
+          <i class="fas fa-upload"></i>
+          <span>Загрузить</span>
+        </button>
       </div>
     </div>
   </header>
+
+  <!-- ════════════════════════════════════════════════════════
+       МОДАЛЬНОЕ ОКНО ЗАГРУЗКИ ВОПРОСОВ
+  ════════════════════════════════════════════════════════ -->
+  <div id="upload-modal" class="modal-backdrop" onclick="onBackdropClick(event)">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+
+      <!-- Заголовок -->
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="modal-icon"><i class="fas fa-file-import"></i></div>
+          <div>
+            <h2 class="modal-title" id="modal-title">Загрузка вопросов</h2>
+            <p class="modal-subtitle">JSON-файл с вашими вопросами и ответами</p>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeUploadModal()" aria-label="Закрыть">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+
+      <!-- Тело -->
+      <div class="modal-body">
+
+        <!-- Зона Drag & Drop -->
+        <div class="drop-zone" id="drop-zone"
+             ondragover="onDragOver(event)" ondragleave="onDragLeave(event)"
+             ondrop="onDrop(event)" onclick="triggerFileInput()">
+          <input type="file" id="file-input" accept=".json,application/json"
+                 style="display:none" onchange="onFileSelected(event)" />
+          <div class="drop-zone-icon" id="dz-icon">
+            <i class="fas fa-cloud-upload-alt"></i>
+          </div>
+          <div class="drop-zone-text" id="dz-text">
+            <strong>Перетащите файл сюда</strong><br>
+            или <span class="dz-link">нажмите для выбора</span>
+          </div>
+          <div class="drop-zone-hint">Поддерживается .json · Максимум 200 вопросов</div>
+        </div>
+
+        <!-- Статус файла -->
+        <div class="file-status hidden" id="file-status">
+          <div class="file-status-icon" id="fs-icon"><i class="fas fa-file-code"></i></div>
+          <div class="file-status-info">
+            <div class="file-status-name" id="fs-name">file.json</div>
+            <div class="file-status-meta" id="fs-meta">0 КБ</div>
+          </div>
+          <button class="file-status-remove" onclick="clearFile()" title="Удалить файл">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+
+        <!-- Предпросмотр распознанных вопросов -->
+        <div class="preview-block hidden" id="preview-block">
+          <div class="preview-header">
+            <i class="fas fa-eye"></i> Предпросмотр
+            <span class="preview-badge" id="preview-count">0 вопросов</span>
+          </div>
+          <div class="preview-list" id="preview-list"></div>
+        </div>
+
+        <!-- Ошибка валидации -->
+        <div class="upload-error hidden" id="upload-error">
+          <i class="fas fa-exclamation-triangle"></i>
+          <span id="upload-error-text"></span>
+        </div>
+
+        <!-- Шаблон -->
+        <div class="template-row">
+          <i class="fas fa-info-circle"></i>
+          Не знаете формат?
+          <a href="/api/template" download="quiz-template.json" class="template-link">
+            <i class="fas fa-download"></i> Скачать шаблон JSON
+          </a>
+        </div>
+
+      </div>
+
+      <!-- Футер -->
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeUploadModal()">Отмена</button>
+        <button class="btn btn-ghost" onclick="resetToDefault()" id="btn-reset-default"
+                title="Вернуть встроенные вопросы">
+          <i class="fas fa-rotate-left"></i> Сбросить
+        </button>
+        <button class="btn btn-primary" id="btn-apply-upload" disabled onclick="applyUpload()">
+          <i class="fas fa-check"></i> Применить
+        </button>
+      </div>
+    </div>
+  </div>
 
   <!-- ОСНОВНОЙ КОНТЕНТ -->
   <main style="flex:1">
@@ -1528,6 +2098,222 @@ function escHtml(str) {
 
 // ─── Запуск ──────────────────────────────────────────────────
 loadQuiz()
+
+// ════════════════════════════════════════════════════════════
+//  ЛОГИКА ЗАГРУЗКИ ВОПРОСОВ
+// ════════════════════════════════════════════════════════════
+
+let uploadedData = null  // распарсенные данные из файла
+let isCustomQuiz = false
+
+// ── Открытие/закрытие модалки ────────────────────────────
+function openUploadModal() {
+  const modal = document.getElementById('upload-modal')
+  modal.classList.add('open')
+  document.body.style.overflow = 'hidden'
+}
+
+function closeUploadModal() {
+  const modal = document.getElementById('upload-modal')
+  modal.classList.remove('open')
+  document.body.style.overflow = ''
+}
+
+function onBackdropClick(e) {
+  if (e.target === document.getElementById('upload-modal')) closeUploadModal()
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeUploadModal()
+})
+
+// ── Drag & Drop ──────────────────────────────────────────
+function onDragOver(e) {
+  e.preventDefault()
+  document.getElementById('drop-zone').classList.add('drag-over')
+}
+
+function onDragLeave() {
+  document.getElementById('drop-zone').classList.remove('drag-over')
+}
+
+function onDrop(e) {
+  e.preventDefault()
+  document.getElementById('drop-zone').classList.remove('drag-over')
+  const file = e.dataTransfer.files[0]
+  if (file) processFile(file)
+}
+
+function triggerFileInput() {
+  document.getElementById('file-input').click()
+}
+
+function onFileSelected(e) {
+  const file = e.target.files[0]
+  if (file) processFile(file)
+}
+
+// ── Обработка файла ──────────────────────────────────────
+function processFile(file) {
+  hideUploadError()
+  clearPreview()
+
+  if (!file.name.toLowerCase().endsWith('.json')) {
+    showUploadError('Поддерживаются только .json файлы')
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    showUploadError('Файл слишком большой (максимум 2 МБ)')
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = (ev) => {
+    try {
+      const parsed = JSON.parse(ev.target.result)
+      uploadedData = parsed
+
+      const kb = (file.size / 1024).toFixed(1)
+      document.getElementById('file-status').classList.remove('hidden')
+      document.getElementById('fs-name').textContent = file.name
+      document.getElementById('fs-meta').textContent = kb + ' КБ'
+      document.getElementById('drop-zone').classList.add('has-file')
+
+      let questions = []
+      if (Array.isArray(parsed)) {
+        questions = parsed
+      } else if (Array.isArray(parsed.questions)) {
+        questions = parsed.questions
+      }
+
+      if (questions.length === 0) {
+        showUploadError('В файле нет вопросов')
+        uploadedData = null
+        return
+      }
+
+      renderUploadPreview(questions)
+      document.getElementById('btn-apply-upload').disabled = false
+      document.getElementById('dz-icon').innerHTML = '<i class="fas fa-check-circle"></i>'
+
+    } catch (err) {
+      showUploadError('Ошибка чтения файла: ' + err.message)
+      uploadedData = null
+    }
+  }
+  reader.readAsText(file, 'utf-8')
+}
+
+// ── Предпросмотр ─────────────────────────────────────────
+function renderUploadPreview(questions) {
+  const block = document.getElementById('preview-block')
+  const list  = document.getElementById('preview-list')
+  const count = document.getElementById('preview-count')
+
+  block.classList.remove('hidden')
+  count.textContent = questions.length + ' ' + pluralQ(questions.length)
+
+  const typeLabel = { single: 'Один', multiple: 'Несколько', text: 'Текст' }
+
+  list.innerHTML = questions.slice(0, 8).map((q, i) => {
+    const tl  = typeLabel[q.type] || q.type || '?'
+    const cls = q.type || 'single'
+    const qText = typeof q.question === 'string'
+      ? (q.question.length > 72 ? q.question.slice(0, 72) + '…' : q.question)
+      : '(нет текста)'
+    return '<div class="preview-item">' +
+      '<div class="preview-item-num">' + (i + 1) + '</div>' +
+      '<div class="preview-item-q">' + escHtml(qText) + '</div>' +
+      '<div class="preview-item-type ' + cls + '">' + tl + '</div>' +
+    '</div>'
+  }).join('') + (questions.length > 8
+    ? '<div class="preview-item" style="color:var(--text-muted);font-size:13px;padding:8px 16px;">… и ещё ' + (questions.length - 8) + ' вопросов</div>'
+    : '')
+}
+
+function pluralQ(n) {
+  if (n % 10 === 1 && n % 100 !== 11) return 'вопрос'
+  if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'вопроса'
+  return 'вопросов'
+}
+
+// ── Очистка файла ────────────────────────────────────────
+function clearFile() {
+  uploadedData = null
+  document.getElementById('file-input').value = ''
+  document.getElementById('file-status').classList.add('hidden')
+  document.getElementById('drop-zone').classList.remove('has-file')
+  document.getElementById('dz-icon').innerHTML = '<i class="fas fa-cloud-upload-alt"></i>'
+  document.getElementById('btn-apply-upload').disabled = true
+  clearPreview()
+  hideUploadError()
+}
+
+function clearPreview() {
+  document.getElementById('preview-block').classList.add('hidden')
+  document.getElementById('preview-list').innerHTML = ''
+}
+
+function showUploadError(msg) {
+  document.getElementById('upload-error-text').textContent = msg
+  document.getElementById('upload-error').classList.remove('hidden')
+}
+
+function hideUploadError() {
+  document.getElementById('upload-error').classList.add('hidden')
+}
+
+// ── Применить файл ───────────────────────────────────────
+async function applyUpload() {
+  if (!uploadedData) return
+
+  const btn = document.getElementById('btn-apply-upload')
+  btn.disabled = true
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Применяю…'
+
+  try {
+    const res = await fetch('/api/upload-quiz', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(uploadedData),
+    })
+    const json = await res.json()
+
+    if (!json.ok) {
+      showUploadError(json.error || 'Ошибка на сервере')
+      btn.disabled = false
+      btn.innerHTML = '<i class="fas fa-check"></i> Применить'
+      return
+    }
+
+    isCustomQuiz = true
+    document.getElementById('custom-badge').classList.add('visible')
+    closeUploadModal()
+    showToast('Загружено ' + json.loaded + ' ' + pluralQ(json.loaded) + '!', 'success', 3500)
+    await loadQuiz()
+    clearFile()
+
+  } catch (e) {
+    showUploadError('Сетевая ошибка: ' + e.message)
+    btn.disabled = false
+    btn.innerHTML = '<i class="fas fa-check"></i> Применить'
+  }
+}
+
+// ── Сброс к дефолтным вопросам ───────────────────────────
+async function resetToDefault() {
+  try {
+    await fetch('/api/reset-quiz', { method: 'POST' })
+    isCustomQuiz = false
+    document.getElementById('custom-badge').classList.remove('visible')
+    closeUploadModal()
+    clearFile()
+    await loadQuiz()
+    showToast('Возвращены встроенные вопросы', '', 2500)
+  } catch (e) {
+    showUploadError('Ошибка сброса: ' + e.message)
+  }
+}
 </script>
 </body>
 </html>`)
