@@ -245,21 +245,23 @@ const API = {
     return apiFetch('/users/search?q=' + encodeURIComponent(q));
   },
   // Billing
-  async getPlans() {
-    return apiFetch('/plans');
-  },
-  async getMySubscription() {
-    return apiFetch('/billing/my');
-  },
-  async createOrder(plan_id) {
-    return apiFetch('/billing/create-order', { method: 'POST', body: JSON.stringify({ plan_id }) });
-  },
-  async getBillingHistory() {
-    return apiFetch('/billing/history');
-  },
-  async getPaymeStatus() {
-    return apiFetch('/billing/payme/status');
-  },
+  async getPlans() { return apiFetch('/plans'); },
+  async getMySubscription() { return apiFetch('/billing/my'); },
+  async createOrder(plan_id) { return apiFetch('/billing/create-order', { method: 'POST', body: JSON.stringify({ plan_id }) }); },
+  async getBillingHistory() { return apiFetch('/billing/history'); },
+  async getPaymeStatus() { return apiFetch('/billing/payme/status'); },
+  async getPoints() { return apiFetch('/billing/points'); },
+  async spendPoints(action) { return apiFetch('/billing/spend', { method: 'POST', body: JSON.stringify({ action }) }); },
+  // Live Session
+  async liveCreate(quiz_id, q_time_limit) { return apiFetch('/live/create', { method: 'POST', body: JSON.stringify({ quiz_id, q_time_limit }) }); },
+  async liveJoin(id, name, avatar) { return apiFetch('/live/' + id + '/join', { method: 'POST', body: JSON.stringify({ name, avatar }) }); },
+  async liveState(id, pid) { return apiFetch('/live/' + id + '/state' + (pid ? '?pid=' + pid : '')); },
+  async liveStart(id) { return apiFetch('/live/' + id + '/start', { method: 'POST' }); },
+  async liveNext(id) { return apiFetch('/live/' + id + '/next', { method: 'POST' }); },
+  async liveFinish(id) { return apiFetch('/live/' + id + '/finish', { method: 'POST' }); },
+  async liveAnswer(id, participant_id, q_index, answer) { return apiFetch('/live/' + id + '/answer', { method: 'POST', body: JSON.stringify({ participant_id, q_index, answer }) }); },
+  async liveResults(id) { return apiFetch('/live/' + id + '/results'); },
+  async liveHistory() { return apiFetch('/live'); },
 };
 
 
@@ -374,6 +376,10 @@ let state = {
   editQuiz: null,         // quiz in editor
   editQIndex: -1,
   totalTime: 0,
+  // Live session state
+  liveSession: null,      // { id, role:'host'|'participant', participant_id, poll_interval }
+  liveState: null,        // last fetched state from server
+  userPlan: null,         // cached plan info
 };
 
 // ───── DEFAULT QUIZZES ────────────────────────────────────────
@@ -560,7 +566,7 @@ function renderApp() {
   if (!app) return;
 
   // Pages that use the sidebar layout
-  const withSidebar = ['home','my-quizzes','create-quiz','edit-quiz','history','admin','settings','plans'];
+  const withSidebar = ['home','my-quizzes','create-quiz','edit-quiz','history','admin','settings','plans','live'];
 
   if (withSidebar.includes(state.page)) {
     app.innerHTML = renderSidebarLayout();
@@ -587,6 +593,7 @@ function renderSidebarLayout() {
     { id:'create-quiz', icon:'fa-plus-circle', label:t('createQuiz'), section:'main' },
     { id:'history', icon:'fa-clock-rotate-left', label:t('history'), section:'main' },
     { id:'admin', icon:'fa-chart-bar', label:t('admin'), section:'admin' },
+    { id:'live', icon:'fa-tower-broadcast', label:LANG==='ru'?'Live сессия':'Live sessiya', section:'admin' },
     { id:'plans', icon:'fa-crown', label:LANG==='ru'?'Тарифы':'Tariflar', section:'admin', badge: null },
     { id:'settings', icon:'fa-gear', label:t('settings'), section:'admin' },
   ];
@@ -667,6 +674,7 @@ function renderPageContent() {
     'edit-quiz': () => renderEditor(state.navParams?.id),
     'history': renderHistory,
     'admin': renderAdmin,
+    'live': renderLive,
     'plans': renderPlans,
     'settings': renderSettings,
   };
@@ -2879,7 +2887,584 @@ function exportAdminCSV(attempts, filename) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PLANS / BILLING PAGE
+// LIVE QUIZ SESSION
+// ═══════════════════════════════════════════════════════════════
+function renderLive() {
+  const area = document.getElementById('content-area');
+  const titleEl = document.getElementById('topbar-title');
+  if (!area) return;
+  if (titleEl) titleEl.innerHTML = `<i class="fas fa-circle live-dot-pulse" style="color:#ef4444;font-size:11px;margin-right:6px;"></i>${LANG==='ru'?'Live сессия':'Live sessiya'}`;
+
+  // Stop any existing poll
+  if (state.liveSession?.poll_interval) {
+    clearInterval(state.liveSession.poll_interval);
+    state.liveSession = null;
+  }
+
+  if (!state.user) {
+    area.innerHTML = `<div class="live-auth-notice">
+      <div class="live-auth-icon"><i class="fas fa-tower-broadcast"></i></div>
+      <h3>${LANG==='ru'?'Live сессия — совместное прохождение тестов':'Live sessiya — birgalikda test ishlash'}</h3>
+      <p>${LANG==='ru'?'Войдите в аккаунт, чтобы создать сессию как ведущий, или введите код для участия.':'Ведущий sifatida sessiya yaratish uchun kiring yoki ishtirok etish uchun kodni kiriting.'}</p>
+      <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:20px;">
+        <button class="btn btn-primary" id="live-login-btn"><i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}</button>
+        <button class="btn btn-secondary" id="live-join-guest-btn"><i class="fas fa-user-secret"></i> ${LANG==='ru'?'Участвовать как гость':'Mehmon sifatida kirish'}</button>
+      </div>
+    </div>`;
+    document.getElementById('live-login-btn')?.addEventListener('click', () => showAuthScreen(() => navigate('live')));
+    document.getElementById('live-join-guest-btn')?.addEventListener('click', () => showLiveJoinModal());
+    return;
+  }
+
+  area.innerHTML = `
+<div class="live-page">
+  <!-- Заголовок -->
+  <div class="live-hero">
+    <div class="live-hero-left">
+      <div class="live-hero-icon"><i class="fas fa-tower-broadcast"></i></div>
+      <div>
+        <div class="live-hero-title">${LANG==='ru'?'Живая сессия теста':'Tirik test sessiyasi'}</div>
+        <div class="live-hero-sub">${LANG==='ru'?'Проводите тесты в реальном времени с участниками':'Ishtirokchilar bilan real vaqtda test o\'tkazing'}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Два блока: создать + присоединиться -->
+  <div class="live-cards-row">
+    <!-- Создать сессию -->
+    <div class="live-card live-card-host">
+      <div class="live-card-header">
+        <div class="live-card-icon" style="background:linear-gradient(135deg,#8b5cf6,#6366f1)"><i class="fas fa-crown"></i></div>
+        <div>
+          <div class="live-card-title">${LANG==='ru'?'Создать сессию':'Sessiya yaratish'}</div>
+          <div class="live-card-sub">${LANG==='ru'?'Вы — ведущий':'Siz — boshlovchi'}</div>
+        </div>
+      </div>
+      <div class="live-card-body">
+        <div class="live-form-group">
+          <label>${LANG==='ru'?'Выберите тест:':'Testni tanlang:'}</label>
+          <select id="live-quiz-select" class="live-select">
+            <option value="">${LANG==='ru'?'— выберите тест —':'— testni tanlang —'}</option>
+            ${state.quizzes.map(q => `<option value="${q.id}">${escHtml(q.title)} (${q.questions?.length||0} ${LANG==='ru'?'вопр.':'savol'})</option>`).join('')}
+          </select>
+        </div>
+        <div class="live-form-group">
+          <label>${LANG==='ru'?'Время на вопрос (сек):':'Savol vaqti (sek):'}</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${[15,20,30,45,60].map(s => `<button class="live-time-btn${s===30?' active':''}" data-secs="${s}">${s}с</button>`).join('')}
+          </div>
+        </div>
+      </div>
+      <button class="btn live-btn-host" id="live-create-btn">
+        <i class="fas fa-play-circle"></i> ${LANG==='ru'?'Создать сессию':'Sessiya yaratish'}
+      </button>
+    </div>
+
+    <!-- Присоединиться -->
+    <div class="live-card live-card-join">
+      <div class="live-card-header">
+        <div class="live-card-icon" style="background:linear-gradient(135deg,#0ea5e9,#06b6d4)"><i class="fas fa-right-to-bracket"></i></div>
+        <div>
+          <div class="live-card-title">${LANG==='ru'?'Присоединиться':'Qo\'shilish'}</div>
+          <div class="live-card-sub">${LANG==='ru'?'Вы — участник':'Siz — ishtirokchi'}</div>
+        </div>
+      </div>
+      <div class="live-card-body">
+        <div class="live-form-group">
+          <label>${LANG==='ru'?'Код сессии (6 символов):':'Sessiya kodi (6 belgi):'}</label>
+          <input class="live-code-input" id="live-join-code" type="text" maxlength="6"
+            placeholder="ABC123" autocomplete="off"
+            style="text-transform:uppercase;letter-spacing:4px;font-size:22px;text-align:center;">
+        </div>
+        <div class="live-form-group">
+          <label>${LANG==='ru'?'Ваше имя:':'Ismingiz:'}</label>
+          <input class="live-input" id="live-join-name" type="text" maxlength="30"
+            placeholder="${escHtml(state.user?.name || (LANG==='ru'?'Участник':'Ishtirokchi'))}"
+            value="${escHtml(state.user?.name || '')}">
+        </div>
+      </div>
+      <button class="btn live-btn-join" id="live-join-btn">
+        <i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Войти в сессию':'Sessiyaga kirish'}
+      </button>
+    </div>
+  </div>
+
+  <!-- История сессий -->
+  <div id="live-history-section">
+    <div style="text-align:center;padding:20px;color:var(--text-muted);"><i class="fas fa-spinner fa-spin"></i></div>
+  </div>
+</div>`;
+
+  // Time selector
+  let selectedSecs = 30;
+  document.querySelectorAll('.live-time-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.live-time-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedSecs = parseInt(btn.dataset.secs);
+    });
+  });
+
+  // Create session
+  document.getElementById('live-create-btn')?.addEventListener('click', async () => {
+    const quizId = document.getElementById('live-quiz-select').value;
+    if (!quizId) { toast(LANG==='ru'?'Выберите тест':'Testni tanlang','warning'); return; }
+
+    // Sync quiz to server first
+    const quiz = state.quizzes.find(q => q.id === quizId);
+    if (quiz) await pushQuizToServer(quiz).catch(() => {});
+
+    const btn = document.getElementById('live-create-btn');
+    btn.disabled = true; btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i>`;
+
+    const r = await API.liveCreate(quizId, selectedSecs);
+    btn.disabled = false; btn.innerHTML = `<i class="fas fa-play-circle"></i> ${LANG==='ru'?'Создать сессию':'Sessiya yaratish'}`;
+
+    if (!r.ok) {
+      if (r.data?.error === 'no_points') {
+        showUpgradeModal('live_start', r.data.have, r.data.need);
+      } else {
+        toast(r.data?.error || (LANG==='ru'?'Ошибка':'Xatolik'), 'error');
+      }
+      return;
+    }
+    startLiveHostView(r.data.session_id, r.data.max_participants);
+  });
+
+  // Join session
+  document.getElementById('live-join-btn')?.addEventListener('click', async () => {
+    const code = document.getElementById('live-join-code').value.trim().toUpperCase();
+    const name = document.getElementById('live-join-name').value.trim() || state.user?.name || (LANG==='ru'?'Участник':'Ishtirokchi');
+    if (code.length < 4) { toast(LANG==='ru'?'Введите код сессии':'Sessiya kodini kiriting','warning'); return; }
+    await joinLiveSession(code, name, state.user?.avatar || '🧑');
+  });
+
+  document.getElementById('live-join-code')?.addEventListener('input', e => {
+    e.target.value = e.target.value.toUpperCase();
+  });
+
+  loadLiveHistory();
+}
+
+async function loadLiveHistory() {
+  const section = document.getElementById('live-history-section');
+  if (!section) return;
+  const r = await API.liveHistory();
+  if (!r.ok || !r.data.sessions?.length) { section.innerHTML = ''; return; }
+  section.innerHTML = `
+<div style="margin-top:24px;">
+  <div style="font-size:16px;font-weight:700;margin-bottom:12px;color:var(--text);">
+    <i class="fas fa-history" style="color:var(--primary)"></i> ${LANG==='ru'?'Мои сессии':'Mening sessiyalarim'}
+  </div>
+  <div style="display:flex;flex-direction:column;gap:8px;">
+  ${r.data.sessions.map(s => `
+  <div class="live-hist-row" data-sid="${s.id}">
+    <div class="live-hist-status ${s.status}"></div>
+    <div style="flex:1;min-width:0;">
+      <div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.quiz_title||'?')}</div>
+      <div style="font-size:12px;color:var(--text-muted);">${new Date(s.created_at*1000).toLocaleString('ru-RU')} · ${s.participant_count} ${LANG==='ru'?'уч.':'ish.'}</div>
+    </div>
+    <span class="live-hist-badge ${s.status}">${s.status==='waiting'?(LANG==='ru'?'Ожидание':'Kutish'):s.status==='active'?(LANG==='ru'?'Активна':'Faol'):(LANG==='ru'?'Завершена':'Tugadi')}</span>
+    ${s.status!=='finished'?`<button class="btn btn-sm btn-primary live-resume-btn" data-sid="${s.id}">${LANG==='ru'?'Открыть':'Ochish'}</button>`:`<button class="btn btn-sm btn-secondary live-result-btn" data-sid="${s.id}"><i class="fas fa-chart-bar"></i></button>`}
+  </div>`).join('')}
+  </div>
+</div>`;
+
+  section.querySelectorAll('.live-resume-btn').forEach(btn => {
+    btn.addEventListener('click', () => startLiveHostView(btn.dataset.sid, 0));
+  });
+  section.querySelectorAll('.live-result-btn').forEach(btn => {
+    btn.addEventListener('click', () => showLiveResults(btn.dataset.sid));
+  });
+}
+
+// ─── HOST VIEW ────────────────────────────────────────────────
+async function startLiveHostView(sessionId, maxPart) {
+  const area = document.getElementById('content-area');
+  if (!area) return;
+
+  state.liveSession = { id: sessionId, role: 'host', participant_id: null, poll_interval: null };
+
+  const renderHostView = async () => {
+    const r = await API.liveState(sessionId, null);
+    if (!r.ok) return;
+    const s = r.data;
+    state.liveState = s;
+
+    const joinUrl = `${location.origin}${location.pathname}?live=${sessionId}`;
+
+    if (s.status === 'waiting') {
+      area.innerHTML = `
+<div class="live-host-screen">
+  <div class="live-host-header">
+    <div class="live-session-badge"><i class="fas fa-tower-broadcast live-dot-pulse"></i> ${LANG==='ru'?'Ожидание участников':'Ishtirokchilar kutilmoqda'}</div>
+    <div class="live-session-code-big">${sessionId}</div>
+    <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">${LANG==='ru'?'Код сессии — участники вводят этот код':'Sessiya kodi — ishtirokchilar ushbu kodni kiritadi'}</div>
+    <button class="btn btn-sm btn-secondary" id="live-copy-link"><i class="fas fa-link"></i> ${LANG==='ru'?'Скопировать ссылку':'Havolani nusxalash'}</button>
+  </div>
+  <div class="live-participants-waiting">
+    <div style="font-size:15px;font-weight:700;margin-bottom:12px;">
+      <i class="fas fa-users" style="color:var(--primary)"></i>
+      ${LANG==='ru'?'Участники':'Ishtirokchilar'} (${s.participants.length}/${maxPart||'∞'})
+    </div>
+    <div class="live-avatars-grid" id="live-avatars">
+      ${s.participants.map(p => `
+      <div class="live-avatar-chip">
+        <span class="live-avatar">${escHtml(p.avatar)}</span>
+        <span>${escHtml(p.name)}</span>
+      </div>`).join('') || `<div style="color:var(--text-muted);font-size:14px;padding:20px;">${LANG==='ru'?'Пока никто не подключился…':'Hali hech kim ulanmadi…'}</div>`}
+    </div>
+  </div>
+  <div style="display:flex;gap:12px;justify-content:center;margin-top:20px;flex-wrap:wrap;">
+    ${s.participants.length > 0
+      ? `<button class="btn live-btn-host" id="live-start-now"><i class="fas fa-play"></i> ${LANG==='ru'?'Начать тест':'Testni boshlash'} (${s.participants.length})</button>`
+      : `<button class="btn btn-secondary" disabled><i class="fas fa-hourglass-half"></i> ${LANG==='ru'?'Ждём участников…':'Ishtirokchilar kutilmoqda…'}</button>`
+    }
+    <button class="btn btn-danger btn-sm" id="live-cancel-btn"><i class="fas fa-times"></i> ${LANG==='ru'?'Отменить':'Bekor qilish'}</button>
+  </div>
+</div>`;
+
+      document.getElementById('live-copy-link')?.addEventListener('click', () => {
+        navigator.clipboard.writeText(joinUrl).then(() => toast(LANG==='ru'?'Ссылка скопирована!':'Havola nusxalandi!','success'));
+      });
+      document.getElementById('live-start-now')?.addEventListener('click', async () => {
+        await API.liveStart(sessionId);
+        renderHostView();
+      });
+      document.getElementById('live-cancel-btn')?.addEventListener('click', async () => {
+        await API.liveFinish(sessionId);
+        if (state.liveSession?.poll_interval) clearInterval(state.liveSession.poll_interval);
+        state.liveSession = null;
+        navigate('live');
+      });
+
+    } else if (s.status === 'active') {
+      const q = s.current_question;
+      const timeLeft = q ? Math.max(0, s.q_time_limit - Math.floor(Date.now()/1000 - s.q_started_at)) : 0;
+      const answered = q ? s.participants.filter(p => {/* approximation */true}).length : 0;
+
+      area.innerHTML = `
+<div class="live-host-screen">
+  <div class="live-host-topbar">
+    <div class="live-progress-info">
+      <span class="live-q-counter">${LANG==='ru'?'Вопрос':'Savol'} ${s.current_q}/${s.total_questions}</span>
+      <div class="live-progress-bar"><div class="live-progress-fill" style="width:${s.current_q/s.total_questions*100}%"></div></div>
+    </div>
+    <div class="live-timer-host ${timeLeft <= 5 ? 'danger' : timeLeft <= 10 ? 'warning' : ''}">
+      <i class="fas fa-clock"></i> ${timeLeft}с
+    </div>
+    <div class="live-parts-count"><i class="fas fa-users"></i> ${s.participants.length}</div>
+  </div>
+
+  ${q ? `
+  <div class="live-question-host">
+    <div class="live-q-number">${LANG==='ru'?'Вопрос':'Savol'} ${s.current_q}</div>
+    <div class="live-q-text">${escHtml(q.question)}</div>
+    ${q.image ? `<img src="${escHtml(q.image)}" style="max-height:160px;border-radius:12px;margin:12px auto;display:block;">` : ''}
+    ${(q.options||[]).length ? `
+    <div class="live-options-host">
+      ${q.options.map((opt, i) => `
+      <div class="live-opt-host" style="--opt-color:${['#ef4444','#f59e0b','#10b981','#6366f1','#0ea5e9','#8b5cf6'][i%6]}">
+        <span class="live-opt-letter">${String.fromCharCode(65+i)}</span>
+        ${escHtml(opt)}
+      </div>`).join('')}
+    </div>` : ''}
+  </div>` : ''}
+
+  <!-- Лидерборд в процессе -->
+  <div class="live-live-board">
+    ${s.participants.slice(0,5).map((p,i) => `
+    <div class="live-board-row">
+      <span class="live-board-rank">${['🥇','🥈','🥉','4','5'][i]}</span>
+      <span class="live-board-avatar">${escHtml(p.avatar)}</span>
+      <span class="live-board-name">${escHtml(p.name)}</span>
+      <span class="live-board-score">${p.score}</span>
+    </div>`).join('')}
+  </div>
+
+  <div style="display:flex;gap:12px;justify-content:center;margin-top:16px;">
+    <button class="btn live-btn-host" id="live-next-btn">
+      ${s.current_q < s.total_questions
+        ? `<i class="fas fa-forward"></i> ${LANG==='ru'?'Следующий вопрос':'Keyingi savol'}`
+        : `<i class="fas fa-flag-checkered"></i> ${LANG==='ru'?'Завершить тест':'Testni yakunlash'}`
+      }
+    </button>
+    <button class="btn btn-danger btn-sm" id="live-end-btn"><i class="fas fa-stop"></i></button>
+  </div>
+</div>`;
+
+      document.getElementById('live-next-btn')?.addEventListener('click', async () => {
+        const nr = await API.liveNext(sessionId);
+        if (nr.data?.finished) {
+          clearInterval(state.liveSession?.poll_interval);
+          showLiveResults(sessionId);
+        } else { renderHostView(); }
+      });
+      document.getElementById('live-end-btn')?.addEventListener('click', async () => {
+        await API.liveFinish(sessionId);
+        clearInterval(state.liveSession?.poll_interval);
+        showLiveResults(sessionId);
+      });
+
+    } else if (s.status === 'finished') {
+      clearInterval(state.liveSession?.poll_interval);
+      showLiveResults(sessionId);
+      return;
+    }
+  };
+
+  await renderHostView();
+  // Poll every 2s
+  if (state.liveSession) {
+    state.liveSession.poll_interval = setInterval(renderHostView, 2000);
+  }
+}
+
+// ─── PARTICIPANT VIEW ────────────────────────────────────────
+async function joinLiveSession(sessionId, name, avatar) {
+  const r = await API.liveJoin(sessionId, name, avatar);
+  if (!r.ok) {
+    const msgs = { session_not_found: LANG==='ru'?'Сессия не найдена':'Sessiya topilmadi', session_finished: LANG==='ru'?'Сессия уже завершена':'Sessiya tugagan', session_full: LANG==='ru'?'Сессия переполнена':'Sessiya to\'la' };
+    toast(msgs[r.data?.error] || (LANG==='ru'?'Ошибка подключения':'Ulanishda xatolik'), 'error');
+    return;
+  }
+  const partId = r.data.participant_id;
+  state.liveSession = { id: sessionId, role: 'participant', participant_id: partId, poll_interval: null };
+  startLiveParticipantView(sessionId, partId);
+}
+
+function startLiveParticipantView(sessionId, partId) {
+  const area = document.getElementById('content-area');
+  if (!area) return;
+
+  let lastQIndex = -1;
+  let answered = false;
+
+  const renderParticipantView = async () => {
+    const r = await API.liveState(sessionId, partId);
+    if (!r.ok) return;
+    const s = r.data;
+    state.liveState = s;
+
+    if (s.status === 'waiting') {
+      const partCount = s.participants.length;
+      area.innerHTML = `
+<div class="live-participant-screen">
+  <div class="live-part-waiting">
+    <div class="live-part-icon"><i class="fas fa-hourglass-half live-dot-pulse"></i></div>
+    <h3>${LANG==='ru'?'Ожидание начала':'Boshlanishini kutish'}</h3>
+    <p>${LANG==='ru'?'Ведущий скоро начнёт тест…':'Boshlovchi tez orada testni boshlaydi…'}</p>
+    <div class="live-waiting-count">
+      <i class="fas fa-users"></i> ${partCount} ${LANG==='ru'?'участников подключилось':'ishtirokchi ulandi'}
+    </div>
+    <div class="live-avatars-grid" style="margin-top:16px;">
+      ${s.participants.map(p => `<div class="live-avatar-chip"><span class="live-avatar">${escHtml(p.avatar)}</span><span>${escHtml(p.name)}</span></div>`).join('')}
+    </div>
+  </div>
+</div>`;
+      return;
+    }
+
+    if (s.status === 'finished') {
+      clearInterval(state.liveSession?.poll_interval);
+      showLiveResults(sessionId, partId);
+      return;
+    }
+
+    // Active
+    const q = s.current_question;
+    const qIndex = s.current_q - 1;
+    const timeLeft = Math.max(0, s.q_time_limit - Math.floor(Date.now()/1000 - s.q_started_at));
+    const myAns = s.my_answer;
+
+    // New question — reset answered
+    if (qIndex !== lastQIndex) { lastQIndex = qIndex; answered = !!myAns; }
+
+    if (!q) return;
+
+    area.innerHTML = `
+<div class="live-participant-screen">
+  <div class="live-part-topbar">
+    <div style="font-size:13px;color:var(--text-muted);">${LANG==='ru'?'Вопрос':'Savol'} ${s.current_q}/${s.total_questions}</div>
+    <div class="live-timer-part ${timeLeft<=5?'danger':timeLeft<=10?'warning':''}">${timeLeft}</div>
+  </div>
+  <div class="live-progress-bar" style="margin-bottom:16px;"><div class="live-progress-fill" style="width:${s.current_q/s.total_questions*100}%"></div></div>
+
+  <div class="live-q-text-part">${escHtml(q.question)}</div>
+  ${q.image ? `<img src="${escHtml(q.image)}" style="max-height:140px;border-radius:12px;margin:8px auto 16px;display:block;">` : ''}
+
+  ${answered || myAns
+    ? `<div class="live-answered-notice ${myAns?.is_correct?'correct':'wrong'}">
+        ${myAns?.is_correct
+          ? `<i class="fas fa-check-circle"></i> ${LANG==='ru'?'Правильно! +':'To\'g\'ri! +'}${myAns.points} ${LANG==='ru'?'очков':'ball'}`
+          : `<i class="fas fa-times-circle"></i> ${LANG==='ru'?'Неверно':'Noto\'g\'ri'}`
+        }
+        <div style="font-size:12px;margin-top:6px;opacity:.8;">${LANG==='ru'?'Ждём следующий вопрос…':'Keyingi savol kutilmoqda…'}</div>
+      </div>
+      <div class="live-mini-board">
+        ${s.participants.slice(0,3).map((p,i) => `<div class="live-mini-row"><span>${['🥇','🥈','🥉'][i]}</span><span>${escHtml(p.name)}</span><span>${p.score}</span></div>`).join('')}
+      </div>`
+    : `<div class="live-options-part" id="live-opts">
+        ${(q.options||[]).map((opt,i) => `
+        <button class="live-opt-part" data-val="${escHtml(opt)}"
+          style="--opt-c:${['#ef4444','#f59e0b','#10b981','#6366f1','#0ea5e9','#8b5cf6'][i%6]}">
+          <span class="live-opt-badge">${String.fromCharCode(65+i)}</span>
+          <span>${escHtml(opt)}</span>
+        </button>`).join('')}
+        ${(q.type==='truefalse') ? `
+        <button class="live-opt-part" data-val="true" style="--opt-c:#10b981"><span class="live-opt-badge">✓</span><span>${LANG==='ru'?'Правда':'To\'g\'ri'}</span></button>
+        <button class="live-opt-part" data-val="false" style="--opt-c:#ef4444"><span class="live-opt-badge">✗</span><span>${LANG==='ru'?'Ложь':'Noto\'g\'ri'}</span></button>` : ''}
+        ${(q.type==='text') ? `
+        <div style="padding:12px 0;">
+          <input class="live-input" id="live-text-ans" type="text" placeholder="${LANG==='ru'?'Ваш ответ…':'Javobingiz…'}" autofocus>
+          <button class="btn live-btn-join" style="margin-top:10px;width:100%;" id="live-text-submit">
+            <i class="fas fa-paper-plane"></i> ${LANG==='ru'?'Ответить':'Javob berish'}
+          </button>
+        </div>` : ''}
+      </div>`
+  }
+</div>`;
+
+    if (!answered && !myAns) {
+      document.querySelectorAll('.live-opt-part').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          answered = true;
+          document.querySelectorAll('.live-opt-part').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
+          btn.style.opacity = '1'; btn.style.borderColor = 'var(--opt-c)'; btn.style.background = 'var(--opt-c)20';
+          await API.liveAnswer(sessionId, partId, qIndex, btn.dataset.val);
+        });
+      });
+      document.getElementById('live-text-submit')?.addEventListener('click', async () => {
+        const val = document.getElementById('live-text-ans').value.trim();
+        if (!val) return;
+        answered = true;
+        await API.liveAnswer(sessionId, partId, qIndex, val);
+      });
+    }
+  };
+
+  renderParticipantView();
+  if (state.liveSession) {
+    state.liveSession.poll_interval = setInterval(renderParticipantView, 1500);
+  }
+}
+
+// ─── RESULTS ────────────────────────────────────────────────
+async function showLiveResults(sessionId, myPartId = null) {
+  const area = document.getElementById('content-area');
+  if (!area) return;
+  if (state.liveSession?.poll_interval) { clearInterval(state.liveSession.poll_interval); }
+
+  const r = await API.liveResults(sessionId);
+  if (!r.ok) { toast(LANG==='ru'?'Ошибка загрузки результатов':'Natijalar yuklanmadi','error'); return; }
+  const res = r.data;
+
+  const myPart = myPartId ? res.participants.find(p => p.id === myPartId) : null;
+  const medals = ['🥇','🥈','🥉'];
+
+  area.innerHTML = `
+<div class="live-results-page">
+  <div class="live-results-header">
+    <div class="live-results-icon"><i class="fas fa-flag-checkered"></i></div>
+    <h2>${LANG==='ru'?'Результаты Live сессии':'Live sessiya natijalari'}</h2>
+    <div style="font-size:13px;color:var(--text-muted);">${res.total_questions} ${LANG==='ru'?'вопросов':'savol'} · ${res.participants.length} ${LANG==='ru'?'участников':'ishtirokchi'}</div>
+  </div>
+
+  ${myPart ? `
+  <div class="live-my-result">
+    <div class="live-my-rank">${medals[myPart.rank-1] || '#'+myPart.rank}</div>
+    <div>
+      <div style="font-size:22px;font-weight:800;">${myPart.score} ${LANG==='ru'?'очков':'ball'}</div>
+      <div style="font-size:13px;color:var(--text-muted);">${myPart.correct}/${res.total_questions} ${LANG==='ru'?'правильно':'to\'g\'ri'} · ${myPart.pct}%</div>
+    </div>
+  </div>` : ''}
+
+  <!-- Подиум top-3 -->
+  ${res.participants.length >= 1 ? `
+  <div class="live-podium">
+    ${res.participants.slice(0,3).reverse().map((p,i) => {
+      const realRank = res.participants.slice(0,3).length - i;
+      const heights = [100, 140, 110];
+      const h = [heights[2], heights[0], heights[1]][i];
+      return `<div class="live-podium-place" style="height:${h}px;">
+        <div class="live-podium-avatar">${escHtml(p.avatar)}</div>
+        <div class="live-podium-name">${escHtml(p.name)}</div>
+        <div class="live-podium-score">${p.score}</div>
+        <div class="live-podium-rank" style="background:${['#f59e0b','#6b7280','#92400e'][realRank-1]||'#6b7280'}">${medals[realRank-1]||realRank}</div>
+      </div>`;
+    }).join('')}
+  </div>` : ''}
+
+  <!-- Таблица всех участников -->
+  <div class="live-results-table">
+    <div style="font-size:15px;font-weight:700;margin-bottom:12px;"><i class="fas fa-list-ol" style="color:var(--primary)"></i> ${LANG==='ru'?'Таблица участников':'Ishtirokchilar jadvali'}</div>
+    ${res.participants.map(p => `
+    <div class="live-result-row ${p.id===myPartId?'my-row':''}">
+      <span class="live-result-rank">${medals[p.rank-1]||p.rank}</span>
+      <span class="live-result-avatar">${escHtml(p.avatar)}</span>
+      <span class="live-result-name">${escHtml(p.name)}</span>
+      <span class="live-result-correct" title="${LANG==='ru'?'Правильных':'To\'g\'ri'}"><i class="fas fa-check" style="color:#10b981"></i> ${p.correct}</span>
+      <span class="live-result-pct">${p.pct}%</span>
+      <span class="live-result-score" style="color:var(--primary);font-weight:800;">${p.score}</span>
+    </div>`).join('')}
+  </div>
+
+  <div style="text-align:center;margin-top:24px;">
+    <button class="btn btn-primary" id="live-back-btn"><i class="fas fa-home"></i> ${LANG==='ru'?'На главную':'Bosh sahifa'}</button>
+  </div>
+</div>`;
+
+  document.getElementById('live-back-btn')?.addEventListener('click', () => navigate('live'));
+}
+
+function showLiveJoinModal() {
+  showModal(`
+<div style="padding:20px;">
+  <h3 style="margin-bottom:16px;"><i class="fas fa-right-to-bracket" style="color:var(--primary)"></i> ${LANG==='ru'?'Войти в сессию':'Sessiyaga kirish'}</h3>
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    <input class="live-code-input" id="modal-live-code" type="text" maxlength="6" placeholder="ABC123"
+      style="text-transform:uppercase;letter-spacing:4px;font-size:22px;text-align:center;padding:12px;border:2px solid var(--border);border-radius:10px;width:100%;box-sizing:border-box;">
+    <input class="live-input" id="modal-live-name" type="text" maxlength="30" placeholder="${LANG==='ru'?'Ваше имя':'Ismingiz'}"
+      style="padding:12px;border:2px solid var(--border);border-radius:10px;width:100%;box-sizing:border-box;font-size:15px;">
+    <button class="btn live-btn-join" id="modal-join-btn" style="width:100%;">
+      <i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Войти':'Kirish'}
+    </button>
+  </div>
+</div>`);
+  document.getElementById('modal-live-code')?.addEventListener('input', e => e.target.value = e.target.value.toUpperCase());
+  document.getElementById('modal-join-btn')?.addEventListener('click', async () => {
+    const code = document.getElementById('modal-live-code').value.trim().toUpperCase();
+    const name = document.getElementById('modal-live-name').value.trim() || (LANG==='ru'?'Гость':'Mehmon');
+    if (code.length < 4) return;
+    document.getElementById('modal-root').innerHTML = '';
+    navigate('live');
+    await joinLiveSession(code, name, '🧑');
+  });
+}
+
+function showUpgradeModal(action, have, need) {
+  const actionNames = { live_start: LANG==='ru'?'запуск Live сессии':'Live sessiyani boshlash', create_quiz: LANG==='ru'?'создание теста':'test yaratish', analytics: LANG==='ru'?'аналитика':'tahlil', export: LANG==='ru'?'экспорт':'eksport' };
+  showModal(`
+<div style="text-align:center;padding:24px 16px;">
+  <div style="font-size:48px;margin-bottom:12px;">⚡</div>
+  <h3 style="margin-bottom:8px;">${LANG==='ru'?'Недостаточно баллов':'Ballar yetarli emas'}</h3>
+  <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px;">
+    ${LANG==='ru'?`Для действия «${actionNames[action]||action}» нужно <b>${need}</b> баллов, у вас <b>${have}</b>.`:
+    `«${actionNames[action]||action}» uchun <b>${need}</b> ball kerak, sizda <b>${have}</b> bor.`}
+  </p>
+  <div style="display:flex;gap:10px;justify-content:center;">
+    <button class="btn btn-secondary" onclick="document.getElementById('modal-root').innerHTML=''">
+      ${LANG==='ru'?'Отмена':'Bekor'}
+    </button>
+    <button class="btn btn-primary" onclick="document.getElementById('modal-root').innerHTML='';navigate('plans')">
+      <i class="fas fa-crown"></i> ${LANG==='ru'?'Улучшить тариф':'Tarifni yaxshilash'}
+    </button>
+  </div>
+</div>`);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PLANS / BILLING PAGE  (updated: Free/Teacher/Business + points)
 // ═══════════════════════════════════════════════════════════════
 async function renderPlans() {
   const area = document.getElementById('content-area');
@@ -2887,279 +3472,253 @@ async function renderPlans() {
   if (!area) return;
   if (titleEl) titleEl.textContent = LANG === 'ru' ? 'Тарифы' : 'Tariflar';
 
-  // Skeleton while loading
-  area.innerHTML = `
-<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:300px;gap:14px;">
-  <i class="fas fa-spinner fa-spin" style="font-size:32px;color:var(--primary)"></i>
-  <div style="color:var(--text-muted);font-size:15px;">${LANG==='ru'?'Загрузка тарифов…':'Tariflar yuklanmoqda…'}</div>
-</div>`;
+  area.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;min-height:300px;">
+    <i class="fas fa-spinner fa-spin" style="font-size:32px;color:var(--primary)"></i></div>`;
 
-  // Fetch plans and current sub in parallel
-  const [plansRes, subRes] = await Promise.all([
+  const [plansRes, pointsRes] = await Promise.all([
     API.getPlans(),
-    state.user ? API.getMySubscription() : Promise.resolve({ ok: false, data: {} }),
+    state.user ? API.getPoints() : Promise.resolve({ ok: false, data: {} }),
   ]);
 
-  const plans   = plansRes.ok ? (plansRes.data.plans || []) : [];
-  const currentPlan = subRes.ok ? (subRes.data.plan || 'free') : 'free';
-  const subExpires  = subRes.ok ? subRes.data.expires_at : null;
+  const plans = plansRes.ok ? (plansRes.data.plans || []) : [];
+  const pd = pointsRes.ok ? pointsRes.data : null;
+  const currentPlan = pd?.plan || 'free';
 
-  // Plan visual config
   const planMeta = {
-    free:     { icon: 'fa-star-half-stroke', color: '#6b7280', bg: '#f3f4f6', badge: '', popular: false },
-    basic:    { icon: 'fa-bolt',             color: '#f59e0b', bg: '#fffbeb', badge: LANG==='ru'?'Старт':'Start', popular: false },
-    pro:      { icon: 'fa-crown',            color: '#8b5cf6', bg: '#f5f3ff', badge: LANG==='ru'?'Популярный':'Mashhur', popular: true },
-    business: { icon: 'fa-building',         color: '#0ea5e9', bg: '#f0f9ff', badge: LANG==='ru'?'Бизнес':'Biznes', popular: false },
+    free:     { icon:'fa-seedling',   color:'#10b981', bg:'#f0fdf4', grad:'linear-gradient(135deg,#10b981,#059669)', popular:false, tag:'' },
+    teacher:  { icon:'fa-chalkboard-user', color:'#6366f1', bg:'#eef2ff', grad:'linear-gradient(135deg,#6366f1,#8b5cf6)', popular:true,  tag:LANG==='ru'?'Популярный':'Mashhur' },
+    business: { icon:'fa-building-columns', color:'#0ea5e9', bg:'#f0f9ff', grad:'linear-gradient(135deg,#0ea5e9,#0284c7)', popular:false, tag:LANG==='ru'?'Для центров':'Markazlar uchun' },
   };
 
-  function formatUZS(uzs) {
-    if (!uzs) return LANG === 'ru' ? 'Бесплатно' : 'Bepul';
-    return uzs.toLocaleString('ru-RU') + ' ' + (LANG === 'ru' ? 'сум/мес' : 'so\'m/oy');
+  // Points widget
+  let pointsHtml = '';
+  if (pd && currentPlan === 'free') {
+    const pct = Math.round((pd.points / (pd.daily_limit || 120)) * 100);
+    const qPct = Math.round((pd.quiz_count / pd.max_quizzes) * 100);
+    const aPct = Math.round((pd.month_attempts / pd.max_attempts) * 100);
+    const warn = (pct < 30 || qPct > 80 || aPct > 80);
+    pointsHtml = `
+<div class="plans-limits-widget ${warn?'warn':''}">
+  <div class="plw-header">
+    <div class="plw-title"><i class="fas fa-bolt" style="color:#f59e0b"></i> ${LANG==='ru'?'Ваши лимиты (Free)':'Sizning limitlaringiz (Free)'}</div>
+    ${warn?`<span class="plw-warn-badge"><i class="fas fa-triangle-exclamation"></i> ${LANG==='ru'?'Лимит заканчивается':'Limit tugayapti'}</span>`:''}
+  </div>
+  <div class="plw-grid">
+    <div class="plw-item">
+      <div class="plw-label"><i class="fas fa-coins" style="color:#f59e0b"></i> ${LANG==='ru'?'Баллы сегодня':'Bugungi ballar'}</div>
+      <div class="plw-bar-wrap"><div class="plw-bar" style="width:${pct}%;background:${pct<30?'#ef4444':'#f59e0b'}"></div></div>
+      <div class="plw-val">${pd.points} / ${pd.daily_limit}</div>
+    </div>
+    <div class="plw-item">
+      <div class="plw-label"><i class="fas fa-layer-group" style="color:#6366f1"></i> ${LANG==='ru'?'Активных тестов':'Faol testlar'}</div>
+      <div class="plw-bar-wrap"><div class="plw-bar" style="width:${qPct}%;background:${qPct>80?'#ef4444':'#6366f1'}"></div></div>
+      <div class="plw-val">${pd.quiz_count} / ${pd.max_quizzes}</div>
+    </div>
+    <div class="plw-item">
+      <div class="plw-label"><i class="fas fa-chart-line" style="color:#10b981"></i> ${LANG==='ru'?'Прохождений/мес':'O\'tishlar/oy'}</div>
+      <div class="plw-bar-wrap"><div class="plw-bar" style="width:${aPct}%;background:${aPct>80?'#ef4444':'#10b981'}"></div></div>
+      <div class="plw-val">${pd.month_attempts} / ${pd.max_attempts}</div>
+    </div>
+  </div>
+  <div class="plw-costs">
+    <div class="plw-costs-title">${LANG==='ru'?'Стоимость действий (баллы):':'Harakatlar narxi (ball):'}</div>
+    <div class="plw-costs-grid">
+      ${[['create_quiz',LANG==='ru'?'Создать тест':'Test yaratish',10],['import',LANG==='ru'?'Импорт файла':'Fayl import',15],['analytics',LANG==='ru'?'Аналитика':'Tahlil',10],['export',LANG==='ru'?'Экспорт':'Eksport',10],['live_start',LANG==='ru'?'Live сессия':'Live sessiya',15],['attempts_20',LANG==='ru'?'20 прохождений':'20 o\'tish',10]].map(([,lbl,cost])=>`
+      <div class="plw-cost-item"><span>${lbl}</span><span class="plw-cost-badge">${cost}</span></div>`).join('')}
+    </div>
+  </div>
+</div>`;
+  } else if (pd && currentPlan !== 'free') {
+    const expDate = pd.expires_at ? new Date(pd.expires_at*1000).toLocaleDateString('ru-RU') : null;
+    pointsHtml = `
+<div class="plans-active-sub">
+  <i class="fas fa-check-circle" style="color:#10b981;font-size:22px;"></i>
+  <div>
+    <b>${LANG==='ru'?'Активная подписка:':'Faol obuna:'} ${plans.find(p=>p.id===currentPlan)?.name?.[LANG]||currentPlan}</b>
+    ${expDate?`<div style="font-size:13px;color:var(--text-muted);">${LANG==='ru'?`до ${expDate}`:`${expDate} gacha`}</div>`:''}
+  </div>
+</div>`;
   }
 
   function renderPlanCard(p) {
     const meta = planMeta[p.id] || planMeta.free;
     const isCurrent = p.id === currentPlan;
-    const name = LANG === 'ru' ? p.name.ru : p.name.uz;
+    const name = LANG==='ru' ? p.name.ru : p.name.uz;
     const features = p.features || [];
-    const maxQ = p.max_quizzes === -1 ? (LANG==='ru'?'Безлимит':'Cheksiz') : p.max_quizzes;
-    const maxQstn = p.max_questions === 9999 || p.max_questions === -1 ? (LANG==='ru'?'Безлимит':'Cheksiz') : p.max_questions;
-
+    const maxQ = p.max_quizzes === -1 ? (LANG==='ru'?'∞ Безлимит':'∞ Cheksiz') : p.max_quizzes;
+    const maxA = p.max_attempts === -1 ? '∞' : p.max_attempts?.toLocaleString('ru-RU');
     return `
-<div class="plan-card${isCurrent?' plan-current':''}${meta.popular?' plan-popular':''}" data-plan-id="${p.id}"
-  style="--plan-color:${meta.color};--plan-bg:${meta.bg};">
-  ${meta.popular ? `<div class="plan-popular-ribbon"><i class="fas fa-fire"></i> ${meta.badge}</div>` : ''}
-  <div class="plan-header">
-    <div class="plan-icon-wrap" style="background:${meta.bg};border:2px solid ${meta.color}20;">
-      <i class="fas ${meta.icon}" style="color:${meta.color};font-size:28px;"></i>
-    </div>
-    <div>
-      <div class="plan-name">${escHtml(name)}</div>
-      ${meta.badge && !meta.popular ? `<span class="plan-badge" style="background:${meta.color}20;color:${meta.color};">${meta.badge}</span>` : ''}
-    </div>
-  </div>
+<div class="plan-card2 ${isCurrent?'plan-card2-current':''} ${meta.popular?'plan-card2-popular':''}" style="--pc:${meta.color};--pg:${meta.grad};--pb:${meta.bg}">
+  ${meta.popular?`<div class="pc2-ribbon"><i class="fas fa-fire"></i> ${meta.tag}</div>`:''}
+  ${meta.tag && !meta.popular?`<div class="pc2-tag" style="background:${meta.color}20;color:${meta.color};">${meta.tag}</div>`:''}
 
-  <div class="plan-price">
-    ${p.price_uzs === 0
-      ? `<span class="plan-price-val" style="color:${meta.color};">${LANG==='ru'?'Бесплатно':'Bepul'}</span>`
-      : `<span class="plan-price-val" style="color:${meta.color};">${p.price_uzs.toLocaleString('ru-RU')}</span>
-         <span class="plan-price-cur">${LANG==='ru'?'сум':'so\'m'}</span>
-         <span class="plan-price-period">/${LANG==='ru'?'мес':'oy'}</span>`
-    }
-  </div>
-
-  <div class="plan-limits">
-    <div class="plan-limit-item">
-      <i class="fas fa-layer-group" style="color:${meta.color}"></i>
-      <span>${LANG==='ru'?'Тестов:':'Testlar:'} <b>${maxQ}</b></span>
-    </div>
-    <div class="plan-limit-item">
-      <i class="fas fa-list-ol" style="color:${meta.color}"></i>
-      <span>${LANG==='ru'?'Вопросов:':'Savollar:'} <b>${maxQstn}</b></span>
+  <div class="pc2-top" style="background:${meta.grad}">
+    <div class="pc2-icon"><i class="fas ${meta.icon}"></i></div>
+    <div class="pc2-name">${escHtml(name)}</div>
+    <div class="pc2-price">
+      ${p.price_uzs===0
+        ? `<span class="pc2-price-free">${LANG==='ru'?'Бесплатно':'Bepul'}</span>`
+        : `<span class="pc2-price-val">${p.price_uzs.toLocaleString('ru-RU')}</span><span class="pc2-price-sub"> ${LANG==='ru'?'сум/мес':'so\'m/oy'}</span>`
+      }
     </div>
   </div>
 
-  <ul class="plan-features">
-    ${features.map(f => `<li><i class="fas fa-check" style="color:${meta.color}"></i> ${escHtml(f)}</li>`).join('')}
-  </ul>
-
-  <div class="plan-action">
-    ${isCurrent
-      ? `<button class="btn plan-btn-current" disabled>
-           <i class="fas fa-check-circle"></i> ${LANG==='ru'?'Текущий план':'Joriy tarif'}
-         </button>`
-      : p.price_uzs === 0
-        ? `<button class="btn plan-btn-free" data-plan-select="${p.id}">
-             <i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Выбрать':'Tanlash'}
-           </button>`
-        : `<button class="btn plan-btn-buy" data-plan-select="${p.id}" style="background:${meta.color};">
-             <i class="fas fa-credit-card"></i>
-             ${LANG==='ru'?'Оплатить через Payme':'Payme orqali to\'lash'}
-           </button>`
-    }
+  <div class="pc2-body">
+    <div class="pc2-stats">
+      <div class="pc2-stat"><i class="fas fa-layer-group"></i><span>${maxQ} ${LANG==='ru'?'тестов':'test'}</span></div>
+      <div class="pc2-stat"><i class="fas fa-users"></i><span>${maxA} ${LANG==='ru'?'прох./мес':'o\'t./oy'}</span></div>
+    </div>
+    <ul class="pc2-features">
+      ${features.map(f=>`<li><i class="fas fa-check-circle" style="color:${meta.color}"></i> ${escHtml(f)}</li>`).join('')}
+    </ul>
+    <div class="pc2-action">
+      ${isCurrent
+        ? `<button class="pc2-btn-current" disabled><i class="fas fa-check"></i> ${LANG==='ru'?'Текущий тариф':'Joriy tarif'}</button>`
+        : p.price_uzs===0
+          ? `<button class="pc2-btn" style="background:${meta.color}" data-plan-select="${p.id}"><i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Выбрать':'Tanlash'}</button>`
+          : `<button class="pc2-btn" style="background:${meta.color}" data-plan-select="${p.id}">
+               <svg width="20" height="14" viewBox="0 0 60 20" fill="none" style="vertical-align:middle;margin-right:4px"><rect width="60" height="20" rx="4" fill="white" fill-opacity="0.25"/><text x="5" y="14" font-family="Arial" font-weight="800" font-size="12" fill="white">payme</text></svg>
+               ${LANG==='ru'?'Оплатить':'To\'lash'}
+             </button>`
+      }
+    </div>
   </div>
 </div>`;
   }
 
-  // Build page
-  let subInfoHtml = '';
-  if (state.user && currentPlan !== 'free' && subExpires) {
-    const expDate = new Date(subExpires * 1000).toLocaleDateString('ru-RU');
-    subInfoHtml = `
-<div class="billing-sub-info">
-  <i class="fas fa-calendar-check" style="color:var(--primary)"></i>
-  ${LANG==='ru'?`Подписка активна до <b>${expDate}</b>`:`Obuna ${expDate} gacha faol`}
-</div>`;
-  }
+  // Comparison table data
+  const compareRows = [
+    { label: LANG==='ru'?'Активных тестов':'Faol testlar',        free:'5',      teacher:'100',    business:'500' },
+    { label: LANG==='ru'?'Прохождений/мес':'O\'tishlar/oy',       free:'300',    teacher:'10 000', business:'50 000' },
+    { label: LANG==='ru'?'Баллы (Free)':'Ball (Free)',             free:'120/день',teacher:'—',     business:'—' },
+    { label: LANG==='ru'?'Устройств':'Qurilmalar',                 free:'1',      teacher:'3',      business:'10' },
+    { label: LANG==='ru'?'Live участников':'Live ishtirokchi',     free:'20',     teacher:'100',    business:'300' },
+    { label: LANG==='ru'?'Аналитика':'Tahlil',                     free:'Базовая',teacher:'Полная', business:'Расширенная' },
+    { label: LANG==='ru'?'Экспорт PDF/CSV':'Eksport PDF/CSV',      free:'✗',      teacher:'✓',      business:'✓' },
+    { label: LANG==='ru'?'Сертификаты':'Sertifikatlar',            free:'✗',      teacher:'✓',      business:'✓' },
+    { label: LANG==='ru'?'Управление доступом':'Kirish boshqaruvi',free:'✗',      teacher:'✓',      business:'✓' },
+    { label: LANG==='ru'?'Сотрудники':'Xodimlar',                  free:'—',      teacher:'—',      business:'5' },
+    { label: LANG==='ru'?'Приоритетная поддержка':'Ustuvor qo\'llab-quvvatlash',free:'✗',teacher:'✗',business:'✓' },
+  ];
 
   area.innerHTML = `
-<div class="billing-page">
-  <div class="billing-hero">
-    <div class="billing-hero-icon"><i class="fas fa-crown"></i></div>
-    <h2 class="billing-hero-title">${LANG==='ru'?'Выберите тарифный план':'Tarif rejasini tanlang'}</h2>
-    <p class="billing-hero-sub">${LANG==='ru'?'Начните бесплатно. Обновите в любое время.':'Bepul boshlang. Istalgan vaqt yangilang.'}</p>
-    ${subInfoHtml}
+<div class="billing-page2">
+  <div class="billing-hero2">
+    <div class="bh2-icon"><i class="fas fa-crown"></i></div>
+    <h2 class="bh2-title">${LANG==='ru'?'Выберите тарифный план':'Tarif rejasini tanlang'}</h2>
+    <p class="bh2-sub">${LANG==='ru'?'Начните бесплатно — улучшайте когда нужно':'Bepul boshlang — kerak bo\'lganda yaxshilang'}</p>
   </div>
 
-  ${plans.length === 0
-    ? `<div style="text-align:center;padding:40px;color:var(--text-muted)">
-         <i class="fas fa-circle-exclamation" style="font-size:40px;margin-bottom:12px;display:block;"></i>
-         ${LANG==='ru'?'Тарифы временно недоступны':'Tariflar vaqtincha mavjud emas'}
-       </div>`
-    : `<div class="plans-grid">${plans.map(renderPlanCard).join('')}</div>`
-  }
+  ${pointsHtml}
 
-  <!-- Payme info block -->
+  <div class="plans-grid2">${plans.map(renderPlanCard).join('')}</div>
+
+  <!-- Таблица сравнения -->
+  <div class="plans-compare">
+    <div class="plans-compare-title"><i class="fas fa-table-list" style="color:var(--primary)"></i> ${LANG==='ru'?'Сравнение тарифов':'Tariflarni solishtirish'}</div>
+    <div style="overflow-x:auto;">
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>${LANG==='ru'?'Функция':'Funksiya'}</th>
+          <th><span style="color:#10b981"><i class="fas fa-seedling"></i></span> Free</th>
+          <th><span style="color:#6366f1"><i class="fas fa-chalkboard-user"></i></span> ${LANG==='ru'?'Учитель':'O\'qituvchi'}</th>
+          <th><span style="color:#0ea5e9"><i class="fas fa-building-columns"></i></span> ${LANG==='ru'?'Бизнес':'Biznes'}</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${compareRows.map(row=>`
+        <tr>
+          <td>${row.label}</td>
+          <td class="${row.free==='✗'?'cmp-no':row.free==='✓'?'cmp-yes':''}">${row.free}</td>
+          <td class="${row.teacher==='✗'?'cmp-no':row.teacher==='✓'?'cmp-yes':''}">${row.teacher}</td>
+          <td class="${row.business==='✗'?'cmp-no':row.business==='✓'?'cmp-yes':''}">${row.business}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- Payme info -->
   <div class="billing-payme-info">
     <div class="billing-payme-logo">
-      <svg width="120" height="32" viewBox="0 0 120 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect width="120" height="32" rx="8" fill="#00ADEF"/>
-        <text x="10" y="22" font-family="Arial,sans-serif" font-weight="700" font-size="16" fill="#fff">payme</text>
-        <circle cx="105" cy="16" r="8" fill="#fff" fill-opacity="0.2"/>
-        <text x="101" y="21" font-family="Arial,sans-serif" font-weight="700" font-size="12" fill="#fff">uz</text>
-      </svg>
+      <svg width="120" height="32" viewBox="0 0 120 32" fill="none"><rect width="120" height="32" rx="8" fill="#00ADEF"/><text x="10" y="22" font-family="Arial,sans-serif" font-weight="700" font-size="16" fill="#fff">payme</text><circle cx="105" cy="16" r="8" fill="#fff" fill-opacity="0.2"/><text x="101" y="21" font-family="Arial,sans-serif" font-weight="700" font-size="12" fill="#fff">uz</text></svg>
     </div>
-    <p>${LANG==='ru'
-      ? 'Оплата через <b>Payme</b> — безопасная платёжная система Узбекистана. Поддерживаются все банковские карты UzCard и Humo.'
-      : '<b>Payme</b> orqali to\'lov — O\'zbekistonning xavfsiz to\'lov tizimi. Barcha UzCard va Humo kartalar qo\'llab-quvvatlanadi.'
-    }</p>
+    <p>${LANG==='ru'?'Оплата через <b>Payme</b> — безопасная платёжная система Узбекистана. Поддерживаются карты <b>UzCard</b> и <b>Humo</b>.':'<b>Payme</b> orqali to\'lov — O\'zbekistonning xavfsiz to\'lov tizimi. <b>UzCard</b> va <b>Humo</b> kartalari qo\'llab-quvvatlanadi.'}</p>
     <div class="billing-cards">
       <div class="billing-card-item"><i class="fas fa-credit-card"></i> UzCard</div>
       <div class="billing-card-item"><i class="fas fa-credit-card"></i> Humo</div>
-      <div class="billing-card-item"><i class="fas fa-lock"></i> ${LANG==='ru'?'SSL защита':'SSL himoya'}</div>
+      <div class="billing-card-item"><i class="fas fa-lock"></i> SSL</div>
     </div>
   </div>
 
-  ${!state.user ? `
-  <div class="billing-login-notice">
+  ${!state.user?`<div class="billing-login-notice">
     <i class="fas fa-circle-info" style="color:var(--primary);font-size:22px;"></i>
-    <div>
-      <b>${LANG==='ru'?'Войдите в аккаунт':'Akkauntga kiring'}</b>
-      <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">
-        ${LANG==='ru'?'Для оформления подписки необходимо войти в аккаунт':'Obuna olish uchun akkauntga kirishingiz kerak'}
-      </div>
-    </div>
-    <button class="btn btn-primary btn-sm" id="btn-plans-login">
-      <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
-    </button>
-  </div>` : ''}
-
-  <!-- История платежей -->
-  ${state.user ? `<div id="billing-history-section"><div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;"><i class="fas fa-spinner fa-spin"></i></div></div>` : ''}
+    <div><b>${LANG==='ru'?'Войдите в аккаунт':'Akkauntga kiring'}</b>
+    <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">${LANG==='ru'?'Для управления подпиской необходимо войти':'Obuna boshqarish uchun kirishingiz kerak'}</div></div>
+    <button class="btn btn-primary btn-sm" id="btn-plans-login"><i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}</button>
+  </div>`:''}
+  ${state.user?`<div id="billing-history-section"><div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;"><i class="fas fa-spinner fa-spin"></i></div></div>`:''}
 </div>`;
 
-  // Attach events
-  document.getElementById('btn-plans-login')?.addEventListener('click', () => {
-    showAuthScreen(() => navigate('plans'));
-  });
-
+  document.getElementById('btn-plans-login')?.addEventListener('click', () => showAuthScreen(() => navigate('plans')));
   document.querySelectorAll('[data-plan-select]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      const planId = btn.dataset.planSelect;
-      if (!state.user) {
-        showAuthScreen(() => navigate('plans'));
-        return;
-      }
-      if (planId === 'free') {
-        toast(LANG==='ru'?'Бесплатный план уже активен':'Bepul tarif allaqachon faol', 'info');
-        return;
-      }
-      await handlePlanPurchase(planId, btn);
+      if (!state.user) { showAuthScreen(() => navigate('plans')); return; }
+      if (btn.dataset.planSelect === 'free') { toast(LANG==='ru'?'Бесплатный план уже доступен':'Bepul tarif allaqachon mavjud','info'); return; }
+      await handlePlanPurchase(btn.dataset.planSelect, btn);
     });
   });
-
-  // Load payment history
-  if (state.user) {
-    loadBillingHistory();
-  }
+  if (state.user) loadBillingHistory();
 }
 
 async function handlePlanPurchase(planId, btn) {
   const origHtml = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Создаём заказ…':'Buyurtma yaratilmoqda…'}`;
-
+  btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i>`;
   const r = await API.createOrder(planId);
-
-  btn.disabled = false;
-  btn.innerHTML = origHtml;
-
+  btn.disabled = false; btn.innerHTML = origHtml;
   if (!r.ok) {
     if (r.data?.payme_configured === false) {
-      showModal(`
-        <div style="text-align:center;padding:24px 16px;">
-          <div style="font-size:48px;margin-bottom:16px;">⚙️</div>
-          <h3 style="margin-bottom:12px;">${LANG==='ru'?'Payme не настроен':'Payme sozlanmagan'}</h3>
-          <p style="color:var(--text-muted);font-size:14px;line-height:1.5;">
-            ${LANG==='ru'
-              ? 'Для приёма платежей необходимо добавить ключи Payme в настройки приложения.<br><br>Добавьте переменные окружения:<br><code>PAYME_MERCHANT_ID</code><br><code>PAYME_SECRET_KEY</code><br><code>PAYME_TEST_SECRET_KEY</code>'
-              : 'To\'lov qabul qilish uchun Payme kalitlarini qo\'shish kerak.'
-            }
-          </p>
-          <button class="btn btn-secondary" onclick="document.getElementById('modal-root').innerHTML=''">
-            ${LANG==='ru'?'Понятно':'Tushundim'}
-          </button>
-        </div>`);
+      showModal(`<div style="text-align:center;padding:24px 16px;">
+        <div style="font-size:48px;margin-bottom:16px;">⚙️</div>
+        <h3>${LANG==='ru'?'Payme не настроен':'Payme sozlanmagan'}</h3>
+        <p style="color:var(--text-muted);font-size:14px;margin:12px 0;">${LANG==='ru'?'Добавьте PAYME_MERCHANT_ID и PAYME_SECRET_KEY в переменные окружения.':'PAYME_MERCHANT_ID va PAYME_SECRET_KEY ni muhit o\'zgaruvchilariga qo\'shing.'}</p>
+        <button class="btn btn-secondary" onclick="document.getElementById('modal-root').innerHTML=''">${LANG==='ru'?'Понятно':'Tushundim'}</button>
+      </div>`);
       return;
     }
-    toast(r.data?.error || (LANG==='ru'?'Ошибка создания заказа':'Buyurtma yaratishda xatolik'), 'error');
-    return;
+    toast(r.data?.error||(LANG==='ru'?'Ошибка':'Xatolik'),'error'); return;
   }
-
   if (r.data.checkout_url) {
-    // Открываем Payme checkout
-    window.open(r.data.checkout_url, '_blank');
-    toast(LANG==='ru'?'Откроется страница оплаты Payme':'Payme to\'lov sahifasi ochiladi', 'info', 5000);
-  } else {
-    toast(LANG==='ru'?'Заказ создан, но ссылка на оплату недоступна':'Buyurtma yaratildi, lekin to\'lov havolasi yo\'q', 'warning');
+    window.open(r.data.checkout_url,'_blank');
+    toast(LANG==='ru'?'Откроется страница оплаты Payme':'Payme to\'lov sahifasi ochiladi','info',5000);
   }
 }
 
 async function loadBillingHistory() {
   const section = document.getElementById('billing-history-section');
   if (!section) return;
-
   const r = await API.getBillingHistory();
-  if (!r.ok || !r.data.payments?.length) {
-    section.innerHTML = '';
-    return;
-  }
-
-  const payments = r.data.payments;
-  const statusLabel = {
-    pending:   { ru: '⏳ Ожидает', uz: '⏳ Kutilmoqda' },
-    paid:      { ru: '✅ Оплачено', uz: '✅ To\'langan' },
-    cancelled: { ru: '❌ Отменён', uz: '❌ Bekor qilingan' },
-    failed:    { ru: '⚠️ Ошибка', uz: '⚠️ Xatolik' },
-  };
-
-  section.innerHTML = `
-<div class="billing-history">
-  <div style="font-size:16px;font-weight:700;margin-bottom:16px;">
-    <i class="fas fa-receipt" style="color:var(--primary)"></i>
-    ${LANG==='ru'?'История платежей':'To\'lov tarixi'}
-  </div>
-  <div style="overflow-x:auto;">
-    <table style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead>
-        <tr style="border-bottom:2px solid var(--border);">
-          <th style="text-align:left;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Дата':'Sana'}</th>
-          <th style="text-align:left;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Тариф':'Tarif'}</th>
-          <th style="text-align:right;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Сумма':'Summa'}</th>
-          <th style="text-align:center;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Статус':'Holat'}</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${payments.map(p => `
-        <tr style="border-bottom:1px solid var(--border);">
-          <td style="padding:10px 12px;">${new Date(p.created_at * 1000).toLocaleDateString('ru-RU')}</td>
-          <td style="padding:10px 12px;font-weight:600;">${escHtml(LANG==='ru'?p.plan.name.ru:p.plan.name.uz)}</td>
-          <td style="padding:10px 12px;text-align:right;font-weight:700;">${p.amount_uzs.toLocaleString('ru-RU')} ${LANG==='ru'?'сум':'so\'m'}</td>
-          <td style="padding:10px 12px;text-align:center;">${(statusLabel[p.status]||{ru:p.status,uz:p.status})[LANG]}</td>
-        </tr>`).join('')}
-      </tbody>
-    </table>
-  </div>
+  if (!r.ok || !r.data.payments?.length) { section.innerHTML=''; return; }
+  const statusLabel = { pending:{ru:'⏳ Ожидает',uz:'⏳ Kutilmoqda'}, paid:{ru:'✅ Оплачено',uz:"✅ To'langan"}, cancelled:{ru:'❌ Отменён',uz:'❌ Bekor'}, failed:{ru:'⚠️ Ошибка',uz:'⚠️ Xato'} };
+  section.innerHTML = `<div class="billing-history">
+  <div style="font-size:15px;font-weight:700;margin-bottom:12px;"><i class="fas fa-receipt" style="color:var(--primary)"></i> ${LANG==='ru'?'История платежей':'To\'lov tarixi'}</div>
+  <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead><tr style="border-bottom:2px solid var(--border);">
+      <th style="text-align:left;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Дата':'Sana'}</th>
+      <th style="text-align:left;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Тариф':'Tarif'}</th>
+      <th style="text-align:right;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Сумма':'Summa'}</th>
+      <th style="text-align:center;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Статус':'Holat'}</th>
+    </tr></thead>
+    <tbody>${r.data.payments.map(p=>`
+    <tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:10px 12px;">${new Date(p.created_at*1000).toLocaleDateString('ru-RU')}</td>
+      <td style="padding:10px 12px;font-weight:600;">${escHtml(LANG==='ru'?p.plan.name.ru:p.plan.name.uz)}</td>
+      <td style="padding:10px 12px;text-align:right;font-weight:700;">${p.amount_uzs?.toLocaleString('ru-RU')} ${LANG==='ru'?'сум':'so\'m'}</td>
+      <td style="padding:10px 12px;text-align:center;">${(statusLabel[p.status]||{ru:p.status,uz:p.status})[LANG]}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>
 </div>`;
 }
 
@@ -4446,6 +5005,29 @@ async function init() {
       }, 400);
     };
     if (!state.user) { showAuthScreen(afterLoad); } else { afterLoad(); }
+    return;
+  }
+
+  // 6. Handle ?live= (join live session from link)
+  const liveParam = params.get('live');
+  if (liveParam) {
+    history.replaceState({}, '', location.pathname);
+    renderApp();
+    setTimeout(() => {
+      navigate('live');
+      setTimeout(() => {
+        const nameVal = state.user?.name || '';
+        const avatar = state.user?.avatar || '🧑';
+        if (state.user) {
+          joinLiveSession(liveParam.toUpperCase(), nameVal || (LANG==='ru'?'Участник':'Ishtirokchi'), avatar);
+        } else {
+          showAuthScreen(() => {
+            navigate('live');
+            setTimeout(() => joinLiveSession(liveParam.toUpperCase(), state.user?.name || (LANG==='ru'?'Участник':'Ishtirokchi'), state.user?.avatar || '🧑'), 300);
+          });
+        }
+      }, 300);
+    }, 200);
     return;
   }
 

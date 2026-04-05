@@ -671,6 +671,382 @@ app.get('/api/users/search', async (c) => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// POINTS & LIMITS SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PLAN_LIMITS: Record<string, { maxQuizzes: number; maxAttempts: number; maxDevices: number; maxLive: number; dailyPoints: number | null }> = {
+  free:     { maxQuizzes: 5,   maxAttempts: 300,   maxDevices: 1,  maxLive: 20,  dailyPoints: 120 },
+  teacher:  { maxQuizzes: 100, maxAttempts: 10000, maxDevices: 3,  maxLive: 100, dailyPoints: null },
+  business: { maxQuizzes: 500, maxAttempts: 50000, maxDevices: 10, maxLive: 300, dailyPoints: null },
+}
+const POINT_COSTS: Record<string, number> = {
+  create_quiz: 10, import: 15, analytics: 10, export: 10, live_start: 15, attempts_20: 10
+}
+
+// Get active plan for user
+async function getUserPlan(db: D1Database, userId: string): Promise<{ plan: string; limits: typeof PLAN_LIMITS['free'] }> {
+  const now = Math.floor(Date.now() / 1000)
+  const sub = await db.prepare(
+    `SELECT plan_id, expires_at FROM subscriptions WHERE user_id=? AND status='active' ORDER BY created_at DESC LIMIT 1`
+  ).bind(userId).first() as any
+  let plan = 'free'
+  if (sub && sub.plan_id !== 'free') {
+    if (!sub.expires_at || sub.expires_at > now) plan = sub.plan_id
+  }
+  return { plan, limits: PLAN_LIMITS[plan] || PLAN_LIMITS.free }
+}
+
+// Get/refill points for free plan user
+async function getPoints(db: D1Database, userId: string): Promise<number> {
+  const now = Math.floor(Date.now() / 1000)
+  const dayStart = now - (now % 86400)
+  let row = await db.prepare('SELECT points, last_refill FROM user_points WHERE user_id=?').bind(userId).first() as any
+  if (!row) {
+    await db.prepare('INSERT OR IGNORE INTO user_points (user_id, points, last_refill) VALUES (?,120,?)').bind(userId, dayStart).run()
+    return 120
+  }
+  // Refill daily
+  if (row.last_refill < dayStart) {
+    await db.prepare('UPDATE user_points SET points=120, last_refill=? WHERE user_id=?').bind(dayStart, userId).run()
+    return 120
+  }
+  return row.points
+}
+
+// Spend points — returns {ok, balance} or {ok:false, need:N, have:N}
+async function spendPoints(db: D1Database, userId: string, action: string): Promise<{ok: boolean; balance?: number; need?: number; have?: number}> {
+  const cost = POINT_COSTS[action] || 0
+  if (cost === 0) return { ok: true, balance: 0 }
+  const points = await getPoints(db, userId)
+  if (points < cost) return { ok: false, need: cost, have: points }
+  const newBalance = points - cost
+  await db.prepare('UPDATE user_points SET points=? WHERE user_id=?').bind(newBalance, userId).run()
+  const id = nanoid()
+  await db.prepare('INSERT INTO points_log (id,user_id,action,cost,balance) VALUES (?,?,?,?,?)').bind(id, userId, action, cost, newBalance).run()
+  return { ok: true, balance: newBalance }
+}
+
+// GET /api/billing/points — баллы и статус тарифа
+app.get('/api/billing/points', async (c) => {
+  const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
+  if (!user) return c.json({ error: 'unauthorized' }, 401)
+  const { plan, limits } = await getUserPlan(db, user.id)
+  const points = limits.dailyPoints !== null ? await getPoints(db, user.id) : null
+  const now = Math.floor(Date.now() / 1000)
+  // Monthly attempts count
+  const monthStart = now - 30 * 86400
+  const attRow = await db.prepare('SELECT COUNT(*) as cnt FROM attempts WHERE user_id=? AND created_at>?').bind(user.id, monthStart).first() as any
+  const monthAttempts = attRow?.cnt || 0
+  // Quiz count
+  const qRow = await db.prepare('SELECT COUNT(*) as cnt FROM quizzes WHERE owner_id=?').bind(user.id).first() as any
+  const quizCount = qRow?.cnt || 0
+  // Device count
+  const dRow = await db.prepare('SELECT COUNT(*) as cnt FROM user_devices WHERE user_id=?').bind(user.id).first() as any
+  const deviceCount = dRow?.cnt || 0
+
+  return c.json({
+    ok: true, plan,
+    points, daily_limit: limits.dailyPoints,
+    quiz_count: quizCount, max_quizzes: limits.maxQuizzes,
+    month_attempts: monthAttempts, max_attempts: limits.maxAttempts,
+    device_count: deviceCount, max_devices: limits.maxDevices,
+    max_live: limits.maxLive,
+    costs: POINT_COSTS,
+  })
+})
+
+// POST /api/billing/spend — списать баллы
+app.post('/api/billing/spend', async (c) => {
+  const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
+  if (!user) return c.json({ error: 'unauthorized' }, 401)
+  const { action } = await c.req.json() as any
+  const { plan } = await getUserPlan(db, user.id)
+  if (plan !== 'free') return c.json({ ok: true, balance: null, skipped: true })
+  const result = await spendPoints(db, user.id, action)
+  return c.json({ ok: result.ok, ...result })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIVE QUIZ SESSION API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function genSessionCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let r = ''
+  const arr = new Uint8Array(6)
+  crypto.getRandomValues(arr)
+  arr.forEach(b => r += chars[b % chars.length])
+  return r
+}
+
+// POST /api/live/create — создать live-сессию (ведущий)
+app.post('/api/live/create', async (c) => {
+  const db = c.env.DB
+  const host = await getUserFromToken(db, getToken(c))
+  if (!host) return c.json({ error: 'unauthorized' }, 401)
+
+  const { quiz_id, q_time_limit = 30 } = await c.req.json() as any
+  const quiz = await db.prepare('SELECT * FROM quizzes WHERE id=? AND owner_id=?').bind(quiz_id, host.id).first() as any
+  if (!quiz) return c.json({ error: 'quiz_not_found' }, 404)
+
+  // Check plan limits & points
+  const { plan, limits } = await getUserPlan(db, host.id)
+  if (plan === 'free') {
+    const spend = await spendPoints(db, host.id, 'live_start')
+    if (!spend.ok) return c.json({ error: 'no_points', need: spend.need, have: spend.have }, 402)
+  }
+
+  const sessionId = genSessionCode()
+  const id = nanoid()
+  await db.prepare(
+    `INSERT INTO live_sessions (id, quiz_id, host_id, host_name, status, q_time_limit, max_participants, quiz_json)
+     VALUES (?, ?, ?, ?, 'waiting', ?, ?, ?)`
+  ).bind(id, quiz_id, host.id, host.name, q_time_limit, limits.maxLive, quiz.questions_json).run()
+
+  return c.json({ ok: true, session_id: id, session_code: id, host_name: host.name, max_participants: limits.maxLive })
+})
+
+// POST /api/live/:id/join — участник присоединяется
+app.post('/api/live/:id/join', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const { name, avatar = '🧑' } = await c.req.json() as any
+  const user = await getUserFromToken(db, getToken(c))
+
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=?').bind(sessionId).first() as any
+  if (!session) return c.json({ error: 'session_not_found' }, 404)
+  if (session.status === 'finished') return c.json({ error: 'session_finished' }, 410)
+
+  // Count participants
+  const cnt = await db.prepare('SELECT COUNT(*) as c FROM live_participants WHERE session_id=?').bind(sessionId).first() as any
+  if ((cnt?.c || 0) >= session.max_participants) return c.json({ error: 'session_full' }, 403)
+
+  const partId = nanoid()
+  const displayName = name || user?.name || 'Участник'
+  const displayAvatar = avatar || user?.avatar || '🧑'
+
+  await db.prepare(
+    `INSERT INTO live_participants (id, session_id, user_id, name, avatar) VALUES (?, ?, ?, ?, ?)`
+  ).bind(partId, sessionId, user?.id || null, displayName, displayAvatar).run()
+
+  const questions = JSON.parse(session.quiz_json || '[]')
+  return c.json({
+    ok: true,
+    participant_id: partId,
+    session: {
+      id: session.id,
+      status: session.status,
+      host_name: session.host_name,
+      current_q: session.current_q,
+      q_started_at: session.q_started_at,
+      q_time_limit: session.q_time_limit,
+      total_questions: questions.length,
+    }
+  })
+})
+
+// GET /api/live/:id/state — текущее состояние сессии (polling)
+app.get('/api/live/:id/state', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const partId = c.req.query('pid') || ''
+
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=?').bind(sessionId).first() as any
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  // Update last_ping
+  if (partId) {
+    await db.prepare('UPDATE live_participants SET last_ping=? WHERE id=?').bind(Math.floor(Date.now()/1000), partId).run()
+  }
+
+  const questions = JSON.parse(session.quiz_json || '[]')
+
+  // Current question (strip correct answer for participants)
+  let currentQuestion = null
+  if (session.status === 'active' && session.current_q > 0 && session.current_q <= questions.length) {
+    const q = { ...questions[session.current_q - 1] }
+    delete q.correct; delete q.explanation
+    currentQuestion = { ...q, index: session.current_q - 1, number: session.current_q }
+  }
+
+  // Participants list with scores
+  const parts = await db.prepare(
+    'SELECT id, name, avatar, score, correct FROM live_participants WHERE session_id=? ORDER BY score DESC'
+  ).bind(sessionId).all()
+
+  // Check if THIS participant answered current question
+  let myAnswer = null
+  if (partId && session.current_q > 0) {
+    myAnswer = await db.prepare(
+      'SELECT answer, is_correct, points FROM live_answers WHERE session_id=? AND participant_id=? AND q_index=?'
+    ).bind(sessionId, partId, session.current_q - 1).first() as any
+  }
+
+  return c.json({
+    ok: true,
+    status: session.status,
+    current_q: session.current_q,
+    q_started_at: session.q_started_at,
+    q_time_limit: session.q_time_limit,
+    total_questions: questions.length,
+    current_question: currentQuestion,
+    participants: (parts.results || []).map((p: any) => ({ id: p.id, name: p.name, avatar: p.avatar, score: p.score, correct: p.correct })),
+    my_answer: myAnswer,
+  })
+})
+
+// POST /api/live/:id/start — ведущий запускает сессию
+app.post('/api/live/:id/start', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const host = await getUserFromToken(db, getToken(c))
+  if (!host) return c.json({ error: 'unauthorized' }, 401)
+
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=? AND host_id=?').bind(sessionId, host.id).first() as any
+  if (!session) return c.json({ error: 'not_found' }, 404)
+  if (session.status !== 'waiting') return c.json({ error: 'already_started' }, 400)
+
+  const now = Math.floor(Date.now() / 1000)
+  await db.prepare(
+    `UPDATE live_sessions SET status='active', current_q=1, q_started_at=?, started_at=? WHERE id=?`
+  ).bind(now, now, sessionId).run()
+
+  return c.json({ ok: true, started_at: now })
+})
+
+// POST /api/live/:id/next — ведущий переходит к следующему вопросу
+app.post('/api/live/:id/next', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const host = await getUserFromToken(db, getToken(c))
+  if (!host) return c.json({ error: 'unauthorized' }, 401)
+
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=? AND host_id=?').bind(sessionId, host.id).first() as any
+  if (!session || session.status !== 'active') return c.json({ error: 'not_found' }, 404)
+
+  const questions = JSON.parse(session.quiz_json || '[]')
+  const now = Math.floor(Date.now() / 1000)
+
+  if (session.current_q >= questions.length) {
+    // Finish session
+    await db.prepare(`UPDATE live_sessions SET status='finished', current_q=?, finished_at=? WHERE id=?`).bind(session.current_q, now, sessionId).run()
+    return c.json({ ok: true, finished: true })
+  }
+
+  const nextQ = session.current_q + 1
+  await db.prepare('UPDATE live_sessions SET current_q=?, q_started_at=? WHERE id=?').bind(nextQ, now, sessionId).run()
+  return c.json({ ok: true, current_q: nextQ, q_started_at: now })
+})
+
+// POST /api/live/:id/finish — ведущий завершает досрочно
+app.post('/api/live/:id/finish', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const host = await getUserFromToken(db, getToken(c))
+  if (!host) return c.json({ error: 'unauthorized' }, 401)
+  const now = Math.floor(Date.now() / 1000)
+  await db.prepare(`UPDATE live_sessions SET status='finished', finished_at=? WHERE id=? AND host_id=?`).bind(now, sessionId, host.id).run()
+  return c.json({ ok: true })
+})
+
+// POST /api/live/:id/answer — участник отправляет ответ
+app.post('/api/live/:id/answer', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const { participant_id, q_index, answer } = await c.req.json() as any
+
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=? AND status=\'active\'').bind(sessionId).first() as any
+  if (!session) return c.json({ error: 'not_active' }, 400)
+  if (session.current_q - 1 !== q_index) return c.json({ error: 'wrong_question' }, 400)
+
+  // Check already answered
+  const existing = await db.prepare('SELECT id FROM live_answers WHERE session_id=? AND participant_id=? AND q_index=?').bind(sessionId, participant_id, q_index).first()
+  if (existing) return c.json({ error: 'already_answered' }, 409)
+
+  const questions = JSON.parse(session.quiz_json || '[]')
+  const q = questions[q_index]
+  if (!q) return c.json({ error: 'question_not_found' }, 404)
+
+  // Check correctness
+  let isCorrect = false
+  const ansStr = Array.isArray(answer) ? answer.sort().join('|') : String(answer).trim().toLowerCase()
+  if (q.type === 'single' || q.type === 'truefalse') {
+    isCorrect = String(q.correct).trim().toLowerCase() === ansStr
+  } else if (q.type === 'multiple') {
+    const correctSorted = (Array.isArray(q.correct) ? q.correct : [q.correct]).map((x: string) => x.trim()).sort().join('|')
+    isCorrect = correctSorted === ansStr
+  } else if (q.type === 'text') {
+    const corrects = Array.isArray(q.correct) ? q.correct : [q.correct]
+    isCorrect = corrects.some((c: string) => c.trim().toLowerCase() === ansStr)
+  }
+
+  // Speed bonus: more points for faster answer
+  const now = Math.floor(Date.now() / 1000)
+  const elapsed = session.q_started_at ? now - session.q_started_at : session.q_time_limit
+  const timeBonus = Math.max(0, session.q_time_limit - elapsed)
+  const points = isCorrect ? (100 + Math.round(timeBonus / session.q_time_limit * 900)) : 0
+
+  const id = nanoid()
+  await db.prepare(
+    'INSERT INTO live_answers (id, session_id, participant_id, q_index, answer, is_correct, points) VALUES (?,?,?,?,?,?,?)'
+  ).bind(id, sessionId, participant_id, q_index, JSON.stringify(answer), isCorrect ? 1 : 0, points).run()
+
+  // Update participant score
+  if (isCorrect) {
+    await db.prepare('UPDATE live_participants SET score=score+?, correct=correct+1 WHERE id=?').bind(points, participant_id).run()
+  } else {
+    await db.prepare('UPDATE live_participants SET wrong=wrong+1 WHERE id=?').bind(participant_id).run()
+  }
+
+  return c.json({ ok: true, is_correct: isCorrect, points, correct_answer: q.correct })
+})
+
+// GET /api/live/:id/results — итоги сессии
+app.get('/api/live/:id/results', async (c) => {
+  const db = c.env.DB
+  const sessionId = c.req.param('id')
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=?').bind(sessionId).first() as any
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  const parts = await db.prepare(
+    'SELECT * FROM live_participants WHERE session_id=? ORDER BY score DESC'
+  ).bind(sessionId).all()
+
+  const questions = JSON.parse(session.quiz_json || '[]')
+
+  return c.json({
+    ok: true,
+    session_id: sessionId,
+    status: session.status,
+    total_questions: questions.length,
+    started_at: session.started_at,
+    finished_at: session.finished_at,
+    participants: (parts.results || []).map((p: any, i: number) => ({
+      rank: i + 1,
+      id: p.id, name: p.name, avatar: p.avatar,
+      score: p.score, correct: p.correct, wrong: p.wrong,
+      pct: questions.length ? Math.round(p.correct / questions.length * 100) : 0,
+    }))
+  })
+})
+
+// GET /api/live — мои сессии (история)
+app.get('/api/live', async (c) => {
+  const db = c.env.DB
+  const host = await getUserFromToken(db, getToken(c))
+  if (!host) return c.json({ error: 'unauthorized' }, 401)
+  const rows = await db.prepare(
+    `SELECT ls.*, q.title as quiz_title,
+      (SELECT COUNT(*) FROM live_participants lp WHERE lp.session_id=ls.id) as participant_count
+     FROM live_sessions ls LEFT JOIN quizzes q ON ls.quiz_id=q.id
+     WHERE ls.host_id=? ORDER BY ls.created_at DESC LIMIT 20`
+  ).bind(host.id).all()
+  return c.json({ ok: true, sessions: rows.results || [] })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // BILLING API  —  Plans, Subscriptions, Payme Payments
 // ═══════════════════════════════════════════════════════════════════════════════
 
