@@ -2084,3 +2084,55 @@ select.form-control { cursor: pointer; }
   .live-session-code-big{font-size:36px;padding:8px 16px}
   .live-podium-place{min-width:72px}
 }
+
+/* ── Home Plan Widget ──────────────────────────────────────────── */
+.home-plan-bar { display:flex;align-items:center;justify-content:space-between;gap:16px;background:var(--card);border:1.5px solid var(--border);border-radius:16px;padding:14px 18px;margin:0 0 20px;flex-wrap:wrap; }
+.home-plan-bar.warn { border-color:#fbbf24;background:#fffdf0; }
+.hpb-left { display:flex;flex-direction:column;gap:6px;flex:1;min-width:0; }
+.hpb-plan-badge { display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:4px 12px;border-radius:20px;width:fit-content; }
+.hpb-points { display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text); }
+.hpb-bar-wrap { height:5px;background:var(--border);border-radius:3px;overflow:hidden;width:100%;max-width:240px; }
+.hpb-bar { height:100%;border-radius:3px;transition:width .4s; }
+.hpb-limits { display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--text-muted); }
+.hpb-limits span { display:flex;align-items:center;gap:4px; }
+.hpb-upgrade-btn { background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none;white-space:nowrap; }
+.hpb-upgrade-btn:hover { opacity:.9; }
+
+/* ── Quiz Card Footer — scrollable actions ─────────────────────── */
+.quiz-card-footer { display:flex;align-items:center;gap:6px;padding:10px 14px;border-top:1px solid var(--border);overflow:hidden; }
+.qcf-main { flex-shrink:0; }
+.qcf-actions-scroll { display:flex;align-items:center;gap:4px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;flex:1; }
+.qcf-actions-scroll::-webkit-scrollbar { display:none; }
+.qcf-actions-scroll .btn { flex-shrink:0; }
+
+/* ── Found Quizzes v2 ──────────────────────────────────────────── */
+.fq-search-bar { display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap; }
+.fq-search-bar .search-box { flex:1;min-width:200px; }
+.fq-info-bar { display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(59,130,246,0.07);border:1px solid rgba(59,130,246,0.2);border-radius:10px;font-size:13px;color:var(--text-muted);margin-bottom:16px; }
+.found-quizzes-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px; }
+.found-quiz-card-v2 { background:var(--card);border:2px solid rgba(99,102,241,0.25);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px;cursor:pointer;transition:transform .15s,box-shadow .15s; }
+.found-quiz-card-v2:hover { transform:translateY(-2px);box-shadow:0 6px 24px rgba(99,102,241,0.15); }
+.fqc-header { display:flex;align-items:center;justify-content:space-between;gap:8px; }
+.fqc-category { font-size:11px;font-weight:700;background:rgba(99,102,241,0.12);color:#6366f1;padding:3px 10px;border-radius:20px; }
+.fqc-locked { font-size:11px;font-weight:700;background:#fef2f2;color:#ef4444;padding:3px 8px;border-radius:20px;display:flex;align-items:center;gap:4px; }
+.fqc-title { font-size:15px;font-weight:700;color:var(--text);line-height:1.3; }
+.fqc-desc { font-size:12px;color:var(--text-muted);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }
+.fqc-meta { display:flex;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--text-muted); }
+.fqc-meta span { display:flex;align-items:center;gap:4px; }
+.fqc-code-row { display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg);border-radius:8px;font-size:12px; }
+.fqc-code { font-weight:700;color:#3b82f6;background:rgba(59,130,246,0.1);padding:2px 8px;border-radius:12px; }
+.fqc-pin { color:var(--text-muted); }
+.fqc-actions { display:flex;align-items:center;gap:6px;margin-top:4px; }
+.fqc-start { flex:1; }
+
+/* ── QR Code container ─────────────────────────────────────────── */
+#live-qr-container { animation:fadeIn .2s ease; }
+@keyframes fadeIn { from{opacity:0;transform:scale(.95)} to{opacity:1;transform:scale(1)} }
+
+/* ── Live session code — 8 chars ───────────────────────────────── */
+.live-session-code-big { font-size:42px;font-weight:900;letter-spacing:6px;color:var(--primary);font-family:'Courier New',monospace;padding:10px 20px;background:var(--bg);border-radius:14px;border:2px dashed var(--primary);display:inline-block;margin:8px 0; }
+@media(max-width:600px){
+  .live-session-code-big{font-size:28px;letter-spacing:3px;padding:8px 12px}
+  .found-quizzes-grid{grid-template-columns:1fr}
+  .home-plan-bar{flex-direction:column;align-items:flex-start}
+}

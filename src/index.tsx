@@ -676,7 +676,7 @@ app.get('/api/users/search', async (c) => {
 
 const PLAN_LIMITS: Record<string, { maxQuizzes: number; maxAttempts: number; maxDevices: number; maxLive: number; dailyPoints: number | null }> = {
   free:     { maxQuizzes: 5,   maxAttempts: 300,   maxDevices: 1,  maxLive: 20,  dailyPoints: 120 },
-  teacher:  { maxQuizzes: 100, maxAttempts: 10000, maxDevices: 3,  maxLive: 100, dailyPoints: null },
+  teacher:  { maxQuizzes: 75, maxAttempts: 10000, maxDevices: 3,  maxLive: 100, dailyPoints: null },
   business: { maxQuizzes: 500, maxAttempts: 50000, maxDevices: 10, maxLive: 300, dailyPoints: null },
 }
 const POINT_COSTS: Record<string, number> = {
@@ -775,7 +775,7 @@ app.post('/api/billing/spend', async (c) => {
 function genSessionCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let r = ''
-  const arr = new Uint8Array(6)
+  const arr = new Uint8Array(8)
   crypto.getRandomValues(arr)
   arr.forEach(b => r += chars[b % chars.length])
   return r
@@ -1123,6 +1123,7 @@ app.get('/api/plans', async (c) => {
       price_month: p.price_month,
       max_quizzes: p.max_quizzes,
       max_questions: p.max_questions,
+      max_attempts: p.max_attempts ?? -1,
       features: JSON.parse(p.features_json || '[]'),
     }))
     return c.json({ ok: true, plans })
