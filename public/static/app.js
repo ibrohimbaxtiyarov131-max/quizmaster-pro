@@ -566,7 +566,7 @@ function renderApp() {
   if (!app) return;
 
   // Pages that use the sidebar layout
-  const withSidebar = ['home','my-quizzes','create-quiz','edit-quiz','history','admin','settings','plans','live'];
+  const withSidebar = ['home','my-quizzes','found-quizzes','create-quiz','edit-quiz','history','admin','settings','plans','live'];
 
   if (withSidebar.includes(state.page)) {
     app.innerHTML = renderSidebarLayout();
@@ -796,21 +796,23 @@ async function loadHomePlanWidget() {
   const r = await API.getPoints();
   if (!r.ok) return;
   const d = r.data;
+  const isVip = state.user?.email === 'ibrohimbaxtiyarov131@gmail.com';
   const planNames = { free: LANG==='ru'?'Бесплатный':'Bepul', teacher: LANG==='ru'?'Учитель':'O\'qituvchi', business: LANG==='ru'?'Бизнес':'Biznes' };
   const planColors = { free:'#10b981', teacher:'#6366f1', business:'#0ea5e9' };
   const planIcons = { free:'fa-seedling', teacher:'fa-chalkboard-user', business:'fa-building-columns' };
   const plan = d.plan || 'free';
-  const color = planColors[plan] || '#10b981';
-  const icon = planIcons[plan] || 'fa-seedling';
+  const color = isVip ? '#f59e0b' : (planColors[plan] || '#10b981');
+  const icon = isVip ? 'fa-star' : (planIcons[plan] || 'fa-seedling');
+  const planLabel = isVip ? 'VIP' : planNames[plan];
 
-  if (plan === 'free') {
+  if (plan === 'free' && !isVip) {
     const pct = Math.min(100, Math.round((d.points / (d.daily_limit||120)) * 100));
     const warn = pct < 20;
     el.innerHTML = `
 <div class="home-plan-bar ${warn?'warn':''}">
   <div class="hpb-left">
     <div class="hpb-plan-badge" style="background:${color}18;color:${color};border:1px solid ${color}40;">
-      <i class="fas ${icon}"></i> ${planNames[plan]}
+      <i class="fas ${icon}"></i> ${planLabel}
     </div>
     <div class="hpb-points">
       <i class="fas fa-coins" style="color:#f59e0b"></i>
@@ -832,10 +834,10 @@ async function loadHomePlanWidget() {
 </div>`;
   } else {
     el.innerHTML = `
-<div class="home-plan-bar">
+<div class="home-plan-bar${isVip?' vip-plan-bar':''}">
   <div class="hpb-left">
     <div class="hpb-plan-badge" style="background:${color}18;color:${color};border:1px solid ${color}40;">
-      <i class="fas ${icon}"></i> ${planNames[plan]}
+      <i class="fas ${icon}"></i> ${planLabel}${isVip?' ⭐':''}
     </div>
     <div class="hpb-limits">
       <span><i class="fas fa-layer-group" style="color:#6366f1"></i> ${d.quiz_count}/${d.max_quizzes===500?'500':d.max_quizzes} ${LANG==='ru'?'тестов':'test'}</span>
@@ -850,10 +852,29 @@ async function loadHomePlanWidget() {
   }
 }
 
+// Cache for access counts per quiz
+const _accessCountCache = {};
+
+async function loadAccessCounts(quizIds) {
+  for (const id of quizIds) {
+    if (_accessCountCache[id] !== undefined) continue;
+    API.getAccesses(id).then(r => {
+      if (r.ok) {
+        const accesses = r.data?.accesses || [];
+        _accessCountCache[id] = accesses.length;
+        // Update badge in DOM if card visible
+        const badge = document.querySelector(`.qc-access-badge[data-quiz-id="${id}"]`);
+        if (badge) badge.textContent = accesses.length;
+      }
+    }).catch(()=>{});
+  }
+}
+
 function renderQuizCard(quiz) {
   const attempts = state.history.filter(h=>h.quizId===quiz.id);
   const avgPct = attempts.length ? Math.round(attempts.reduce((s,h)=>s+h.percent,0)/attempts.length) : null;
   const locked = quiz.isLocked;
+  const accessCount = _accessCountCache[quiz.id];
   return `
 <div class="quiz-card${locked?' quiz-card-locked':''}" data-quiz-id="${quiz.id}">
   <div class="quiz-card-header">
@@ -868,6 +889,7 @@ function renderQuizCard(quiz) {
       ${quiz.timeLimit?`<div class="quiz-meta-item"><i class="fas fa-stopwatch"></i> ${quiz.timeLimit} ${t('min')}</div>`:''}
       <div class="quiz-meta-item"><i class="fas fa-percent"></i> ${quiz.passingScore}%</div>
       ${attempts.length?`<div class="quiz-meta-item"><i class="fas fa-rotate"></i> ${attempts.length}x</div>`:''}
+      ${state.user?`<div class="quiz-meta-item qc-access-item" style="cursor:pointer;color:var(--primary);font-size:11px;" data-action="accesses" data-quiz-id="${quiz.id}" title="${LANG==='ru'?'Кто открывал':'Kim ochdi'}"><i class="fas fa-eye"></i> <span class="qc-access-badge" data-quiz-id="${quiz.id}">${accessCount !== undefined ? accessCount : '...'}</span></div>`:''}
     </div>
     ${quiz.code?`<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;"><i class="fas fa-hashtag"></i> <b style="color:var(--primary)">${quiz.code}</b> &nbsp;PIN: <b style="color:var(--warning,#f59e0b)">${quiz.pin||'????'}</b></div>`:''}
     ${avgPct!==null?`<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">${t('avgScore')}: <b style="color:var(--primary)">${avgPct}%</b></div>`:''}
@@ -880,7 +902,7 @@ function renderQuizCard(quiz) {
     <div class="qcf-actions-scroll">
       <button class="btn btn-secondary btn-sm btn-icon" title="${t('editQuiz')}" data-action="edit" data-quiz-id="${quiz.id}"><i class="fas fa-pen"></i></button>
       <button class="btn btn-secondary btn-sm btn-icon" title="${t('shareQuiz')}" data-action="share" data-quiz-id="${quiz.id}"><i class="fas fa-share-alt"></i></button>
-      <button class="btn btn-secondary btn-sm btn-icon" title="${LANG==='ru'?'Кто имеет доступ':'Kim kirdi'}" data-action="accesses" data-quiz-id="${quiz.id}"><i class="fas fa-users"></i></button>
+      <button class="btn btn-secondary btn-sm btn-icon" title="${LANG==='ru'?'Кто открывал':'Kim ochdi'}" data-action="accesses" data-quiz-id="${quiz.id}"><i class="fas fa-users"></i>${accessCount!==undefined?` <span style="font-size:10px;font-weight:700;">${accessCount}</span>`:''}</button>
       <button class="btn btn-secondary btn-sm btn-icon" title="${LANG==='ru'?'Управление доступом':'Kirish boshqaruvi'}" data-action="restrict" data-quiz-id="${quiz.id}"><i class="fas fa-user-shield"></i></button>
       <button class="btn btn-sm btn-icon ${locked?'btn-warning':'btn-secondary'}" title="${locked?(LANG==='ru'?'Разблокировать тест':'Testni ochish'):(LANG==='ru'?'Заблокировать тест':'Testni bloklash')}" data-action="lock" data-quiz-id="${quiz.id}">
         <i class="fas ${locked?'fa-lock-open':'fa-lock'}"></i>
@@ -965,6 +987,10 @@ function renderMyQuizzes() {
     showAuthScreen(() => { pushAllLocalQuizzesToServer(); renderMyQuizzes(); });
   });
   attachQuizCardEvents();
+  // Lazy load access counts for quiz cards
+  if (state.user && state.quizzes.length) {
+    loadAccessCounts(state.quizzes.map(q=>q.id));
+  }
   // Search filter
   const search = document.getElementById('quiz-search');
   const catSel = document.getElementById('cat-filter');
@@ -2220,7 +2246,42 @@ function showStartScreen(quiz, overrides={}) {
   });
 }
 
-function launchQuiz(quiz, overrides={}) {
+async function launchQuiz(quiz, overrides={}) {
+  // Check monthly attempts limit for Free plan users
+  if (state.user) {
+    const r = await API.getPoints();
+    if (r.ok && r.data) {
+      const d = r.data;
+      if (d.plan === 'free' && d.month_attempts >= d.max_attempts) {
+        showModal(`
+<div class="modal-header"><i class="fas fa-lock" style="color:#ef4444;font-size:20px"></i>
+  <span class="modal-title">${LANG==='ru'?'Лимит попыток исчерпан':'Urinishlar limiti tugadi'}</span>
+  <button class="btn btn-icon btn-secondary" onclick="closeModal()"><i class="fas fa-times"></i></button>
+</div>
+<div class="modal-body" style="text-align:center;padding:32px 24px;">
+  <div style="font-size:48px;margin-bottom:16px;">🚫</div>
+  <div style="font-size:16px;font-weight:700;margin-bottom:8px;color:#ef4444;">
+    ${LANG==='ru'?`Вы использовали ${d.month_attempts} из ${d.max_attempts} попыток в этом месяце`:`Bu oy ${d.max_attempts} urinishdan ${d.month_attempts}ini ishlatdingiz`}
+  </div>
+  <div style="font-size:14px;color:var(--text-muted);margin-bottom:24px;">
+    ${LANG==='ru'?'Обновите тариф, чтобы продолжать проходить тесты':'Testlarni davom ettirish uchun tarifni yangilang'}
+  </div>
+  <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+    <button class="btn btn-secondary" onclick="closeModal()">${LANG==='ru'?'Закрыть':'Yopish'}</button>
+    <button class="btn btn-primary" onclick="closeModal();navigate('plans')">
+      <i class="fas fa-crown"></i> ${LANG==='ru'?'Купить тариф':'Tarif sotib olish'}
+    </button>
+  </div>
+  <div style="margin-top:20px;font-size:12px;color:var(--text-muted);">
+    <b style="color:#6366f1">Teacher — 29 000 сум/мес:</b> ${LANG==='ru'?'10 000 попыток/мес':'10 000 urinish/oy'}<br>
+    <b style="color:#0ea5e9">Business — 69 000 сум/мес:</b> ${LANG==='ru'?'50 000 попыток/мес':'50 000 urinish/oy'}
+  </div>
+</div>`);
+        return;
+      }
+    }
+  }
+
   const maxQ = overrides.maxQuestions || quiz.maxQuestions || 0;
   let order = quiz.questions.map((_,i)=>i);
   if (quiz.shuffleQuestions) order = shuffle(order);

@@ -683,8 +683,17 @@ const POINT_COSTS: Record<string, number> = {
   create_quiz: 10, import: 15, analytics: 10, export: 10, live_start: 15, attempts_20: 10
 }
 
+// VIP users — permanent Business-plan access regardless of subscriptions
+const VIP_EMAILS = new Set(['ibrohimbaxtiyarov131@gmail.com'])
+
 // Get active plan for user
 async function getUserPlan(db: D1Database, userId: string): Promise<{ plan: string; limits: typeof PLAN_LIMITS['free'] }> {
+  // Check VIP status first
+  const userRow = await db.prepare('SELECT email FROM users WHERE id=?').bind(userId).first() as any
+  if (userRow?.email && VIP_EMAILS.has(userRow.email.toLowerCase())) {
+    return { plan: 'business', limits: PLAN_LIMITS.business }
+  }
+
   const now = Math.floor(Date.now() / 1000)
   const sub = await db.prepare(
     `SELECT plan_id, expires_at FROM subscriptions WHERE user_id=? AND status='active' ORDER BY created_at DESC LIMIT 1`
