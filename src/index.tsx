@@ -236,6 +236,7 @@ function quizRow(row: any) {
     showExplanations: row.show_explanations,
     maxQuestions: row.max_questions,
     isPublic: !!row.is_public,
+    isLocked: !!row.is_locked,
     questions: JSON.parse(row.questions_json || '[]'),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -348,7 +349,68 @@ app.get('/api/quizzes/find', async (c) => {
   const db = c.env.DB
   const row = await db.prepare('SELECT * FROM quizzes WHERE code=? AND pin=?').bind(code, pin).first() as any
   if (!row) return c.json({ error: 'not_found' }, 404)
+  if (row.is_locked) return c.json({ error: 'locked', message: 'Quiz is locked by owner' }, 403)
   return c.json({ ok: true, quiz: quizRow(row) })
+})
+
+// PATCH /api/quizzes/:id/lock — заблокировать/разблокировать тест
+app.patch('/api/quizzes/:id/lock', async (c) => {
+  const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
+  if (!user) return c.json({ error: 'unauthorized' }, 401)
+  const id = c.req.param('id')
+  const quiz = await db.prepare('SELECT * FROM quizzes WHERE id=?').bind(id).first() as any
+  if (!quiz) return c.json({ error: 'not_found' }, 404)
+  if (quiz.owner_id !== user.id) return c.json({ error: 'forbidden' }, 403)
+  const body = await c.req.json() as any
+  const locked = body.locked ? 1 : 0
+  await db.prepare('UPDATE quizzes SET is_locked=?, updated_at=unixepoch() WHERE id=?').bind(locked, id).run()
+  return c.json({ ok: true, isLocked: !!locked })
+})
+
+// GET /api/quizzes/:id/accesses — кто имел доступ (только владелец)
+app.get('/api/quizzes/:id/accesses', async (c) => {
+  const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
+  if (!user) return c.json({ error: 'unauthorized' }, 401)
+  const id = c.req.param('id')
+  const quiz = await db.prepare('SELECT owner_id FROM quizzes WHERE id=?').bind(id).first() as any
+  if (!quiz) return c.json({ error: 'not_found' }, 404)
+  if (quiz.owner_id !== user.id) return c.json({ error: 'forbidden' }, 403)
+  const rows = await db.prepare(
+    'SELECT * FROM quiz_accesses WHERE quiz_id=? ORDER BY accessed_at DESC LIMIT 200'
+  ).bind(id).all()
+  return c.json({ ok: true, accesses: (rows.results || []).map((r: any) => ({
+    id: r.id, userId: r.user_id, userName: r.user_name, userEmail: r.user_email,
+    userAvatar: r.user_avatar, accessedAt: r.accessed_at
+  }))})
+})
+
+// POST /api/quizzes/:id/access — записать факт доступа (при старте теста)
+app.post('/api/quizzes/:id/access', async (c) => {
+  try {
+    const db = c.env.DB
+    const user = await getUserFromToken(db, getToken(c))
+    const id = c.req.param('id')
+    const body = await c.req.json() as any
+    if (user?.id) {
+      const existing = await db.prepare('SELECT id FROM quiz_accesses WHERE quiz_id=? AND user_id=?').bind(id, user.id).first()
+      if (existing) {
+        await db.prepare('UPDATE quiz_accesses SET accessed_at=unixepoch() WHERE quiz_id=? AND user_id=?').bind(id, user.id).run()
+        return c.json({ ok: true })
+      }
+    }
+    const accessId = nanoid()
+    await db.prepare(
+      'INSERT INTO quiz_accesses (id,quiz_id,user_id,user_name,user_email,user_avatar) VALUES (?,?,?,?,?,?)'
+    ).bind(
+      accessId, id, user?.id || null,
+      user?.name || body.userName || 'Гость',
+      user?.email || null,
+      user?.avatar || '🧑'
+    ).run()
+    return c.json({ ok: true })
+  } catch(e: any) { return c.json({ error: e.message }, 500) }
 })
 
 // GET /api/quizzes/:id — получить тест по ID (публичный, без ответов)
@@ -412,16 +474,73 @@ app.get('/api/attempts', async (c) => {
   })
 })
 
-// GET /api/analytics/:quizId — аналитика по тесту
+// GET /api/analytics/:quizId — полная аналитика по тесту
 app.get('/api/analytics/:quizId', async (c) => {
   const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
   const quizId = c.req.param('quizId')
-  const stats = await db.prepare(`
-    SELECT COUNT(*) as total, AVG(percent) as avg_pct,
-           SUM(CASE WHEN passed=1 THEN 1 ELSE 0 END) as passed_count
-    FROM attempts WHERE quiz_id=?
-  `).bind(quizId).first() as any
-  return c.json({ ok: true, stats: { total: stats?.total || 0, avgPercent: Math.round(stats?.avg_pct || 0), passedCount: stats?.passed_count || 0 } })
+  const quiz = await db.prepare('SELECT * FROM quizzes WHERE id=?').bind(quizId).first() as any
+  if (!quiz) return c.json({ error: 'not_found' }, 404)
+  if (quiz.owner_id && user?.id !== quiz.owner_id) return c.json({ error: 'forbidden' }, 403)
+
+  const attempts = await db.prepare(
+    'SELECT * FROM attempts WHERE quiz_id=? ORDER BY created_at DESC'
+  ).bind(quizId).all()
+  const rows = (attempts.results || []) as any[]
+  const total = rows.length
+  const avgPct = total ? Math.round(rows.reduce((s: number, r: any) => s + r.percent, 0) / total) : 0
+  const passedCount = rows.filter((r: any) => r.passed).length
+  const avgDuration = total ? Math.round(rows.reduce((s: number, r: any) => s + r.duration, 0) / total) : 0
+  return c.json({
+    ok: true, quiz: quizRow(quiz),
+    stats: { total, avgPercent: avgPct, passedCount, avgDuration },
+    attempts: rows.map((r: any) => ({
+      id: r.id, userId: r.user_id, userName: r.user_name,
+      percent: r.percent, correct: r.correct, wrong: r.wrong,
+      skipped: r.skipped, total: r.total, passed: !!r.passed,
+      duration: r.duration, createdAt: r.created_at,
+      answers: JSON.parse(r.answers_json || '{}')
+    }))
+  })
+})
+
+// GET /api/admin/overview — общая статистика по всем тестам владельца
+app.get('/api/admin/overview', async (c) => {
+  const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
+  if (!user) return c.json({ error: 'unauthorized' }, 401)
+
+  const quizzes = await db.prepare('SELECT * FROM quizzes WHERE owner_id=? ORDER BY updated_at DESC').bind(user.id).all()
+  const quizIds = (quizzes.results || []).map((q: any) => q.id)
+  if (!quizIds.length) return c.json({ ok: true, quizzes: [], totalAttempts: 0, totalUsers: 0, recentAttempts: [] })
+
+  const placeholders = quizIds.map(() => '?').join(',')
+  const attempts = await db.prepare(
+    `SELECT a.*, q.title as quiz_title FROM attempts a JOIN quizzes q ON a.quiz_id=q.id WHERE a.quiz_id IN (${placeholders}) ORDER BY a.created_at DESC LIMIT 500`
+  ).bind(...quizIds).all()
+  const attemptRows = (attempts.results || []) as any[]
+  const uniqueUsers = new Set(attemptRows.filter((r: any) => r.user_id).map((r: any) => r.user_id)).size
+
+  const quizStats = (quizzes.results || []).map((q: any) => {
+    const qa = attemptRows.filter((r: any) => r.quiz_id === q.id)
+    return {
+      ...quizRow(q),
+      attemptCount: qa.length,
+      avgPercent: qa.length ? Math.round(qa.reduce((s: number, r: any) => s + r.percent, 0) / qa.length) : 0,
+      passRate: qa.length ? Math.round(qa.filter((r: any) => r.passed).length / qa.length * 100) : 0,
+      avgDuration: qa.length ? Math.round(qa.reduce((s: number, r: any) => s + r.duration, 0) / qa.length) : 0,
+    }
+  })
+
+  return c.json({
+    ok: true, totalAttempts: attemptRows.length, totalUsers: uniqueUsers,
+    recentAttempts: attemptRows.slice(0, 50).map((r: any) => ({
+      id: r.id, quizId: r.quiz_id, quizTitle: r.quiz_title,
+      userName: r.user_name, percent: r.percent, passed: !!r.passed,
+      duration: r.duration, createdAt: r.created_at
+    })),
+    quizzes: quizStats
+  })
 })
 
 // ─── JSON Template ────────────────────────────────────────────────────────────

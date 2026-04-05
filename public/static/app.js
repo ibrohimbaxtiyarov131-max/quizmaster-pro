@@ -200,6 +200,15 @@ const API = {
   async deleteQuiz(id) {
     return apiFetch('/quizzes/' + id, { method: 'DELETE' });
   },
+  async lockQuiz(id, locked) {
+    return apiFetch('/quizzes/' + id + '/lock', { method: 'PATCH', body: JSON.stringify({ locked }) });
+  },
+  async getAccesses(id) {
+    return apiFetch('/quizzes/' + id + '/accesses');
+  },
+  async recordAccess(id, userName) {
+    return apiFetch('/quizzes/' + id + '/access', { method: 'POST', body: JSON.stringify({ userName }) });
+  },
   async findByCodePin(code, pin) {
     return apiFetch('/quizzes/find?code=' + encodeURIComponent(code) + '&pin=' + encodeURIComponent(pin));
   },
@@ -216,6 +225,9 @@ const API = {
   async getAnalytics(quizId) {
     return apiFetch('/analytics/' + quizId);
   },
+  async getAdminOverview() {
+    return apiFetch('/admin/overview');
+  },
   async health() {
     return apiFetch('/health');
   },
@@ -223,10 +235,11 @@ const API = {
 
 
 const STORAGE = {
-  QUIZZES:  'qm_quizzes',
-  HISTORY:  'qm_history',
-  SETTINGS: 'qm_settings',
-  USER:     'qm_user',
+  QUIZZES:       'qm_quizzes',
+  FOUND_QUIZZES: 'qm_found_quizzes',   // чужие тесты найденные по коду
+  HISTORY:       'qm_history',
+  SETTINGS:      'qm_settings',
+  USER:          'qm_user',
 };
 function loadStorage(key, def = []) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; }
@@ -316,6 +329,7 @@ async function pushAllLocalQuizzesToServer() {
 let state = {
   page: 'home',
   quizzes: loadStorage(STORAGE.QUIZZES, getDefaultQuizzes()),
+  foundQuizzes: loadStorage(STORAGE.FOUND_QUIZZES, []),  // чужие тесты
   history: loadStorage(STORAGE.HISTORY, []),
   settings: loadStorage(STORAGE.SETTINGS, { theme: 'light' }),
   user: loadUser(),            // { name, avatar, provider } or null
@@ -540,7 +554,8 @@ function renderSidebarLayout() {
   const navItems = [
     { id:'home', icon:'fa-house', label:t('home'), section:'main' },
     { id:'my-quizzes', icon:'fa-layer-group', label:t('myQuizzes'), section:'main' },
-    { id:'create-quiz', icon:'fa-plus-circle', label:t('createQuiz'), section:'main', badge: null },
+    { id:'found-quizzes', icon:'fa-search', label:LANG==='ru'?'Найденные тесты':'Topilgan testlar', section:'main', badge: state.foundQuizzes.length || null },
+    { id:'create-quiz', icon:'fa-plus-circle', label:t('createQuiz'), section:'main' },
     { id:'history', icon:'fa-clock-rotate-left', label:t('history'), section:'main' },
     { id:'admin', icon:'fa-chart-bar', label:t('admin'), section:'admin' },
     { id:'settings', icon:'fa-gear', label:t('settings'), section:'admin' },
@@ -617,6 +632,7 @@ function renderPageContent() {
   const pages = {
     'home': renderHome,
     'my-quizzes': renderMyQuizzes,
+    'found-quizzes': renderFoundQuizzes,
     'create-quiz': () => renderEditor(null),
     'edit-quiz': () => renderEditor(state.navParams?.id),
     'history': renderHistory,
@@ -733,12 +749,13 @@ ${recentQuizzes.length ? `
 
 function renderQuizCard(quiz) {
   const attempts = state.history.filter(h=>h.quizId===quiz.id);
-  const last = attempts[attempts.length-1];
   const avgPct = attempts.length ? Math.round(attempts.reduce((s,h)=>s+h.percent,0)/attempts.length) : null;
+  const locked = quiz.isLocked;
   return `
-<div class="quiz-card" data-quiz-id="${quiz.id}">
+<div class="quiz-card${locked?' quiz-card-locked':''}" data-quiz-id="${quiz.id}">
   <div class="quiz-card-header">
     <div class="quiz-card-category">${escHtml(quiz.category||t('category'))}</div>
+    ${locked ? `<span style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;"><i class="fas fa-lock"></i> ${LANG==='ru'?'Закрыт':'Yopiq'}</span>` : ''}
     <div class="quiz-card-title">${escHtml(quiz.title)}</div>
     <div class="quiz-card-desc">${escHtml(quiz.description||'')}</div>
   </div>
@@ -759,6 +776,10 @@ function renderQuizCard(quiz) {
     <button class="btn btn-primary btn-sm" data-action="start" data-quiz-id="${quiz.id}"><i class="fas fa-play"></i> ${t('startQuiz')}</button>
     <button class="btn btn-secondary btn-sm btn-icon" title="${t('editQuiz')}" data-action="edit" data-quiz-id="${quiz.id}"><i class="fas fa-pen"></i></button>
     <button class="btn btn-secondary btn-sm btn-icon" title="${t('shareQuiz')}" data-action="share" data-quiz-id="${quiz.id}"><i class="fas fa-share-alt"></i></button>
+    <button class="btn btn-secondary btn-sm btn-icon" title="${LANG==='ru'?'Кто имеет доступ':'Kim kirdi'}" data-action="accesses" data-quiz-id="${quiz.id}"><i class="fas fa-users"></i></button>
+    <button class="btn btn-sm btn-icon ${locked?'btn-warning':'btn-secondary'}" title="${locked?(LANG==='ru'?'Разблокировать тест':'Testni ochish'):(LANG==='ru'?'Заблокировать тест':'Testni bloklash')}" data-action="lock" data-quiz-id="${quiz.id}">
+      <i class="fas ${locked?'fa-lock-open':'fa-lock'}"></i>
+    </button>
     <button class="btn btn-danger btn-sm btn-icon" title="${t('deleteQuiz')}" data-action="delete" data-quiz-id="${quiz.id}" style="margin-left:auto"><i class="fas fa-trash"></i></button>
   </div>
 </div>`;
@@ -774,6 +795,8 @@ function attachQuizCardEvents() {
       else if (action==='edit') navigate('edit-quiz',{id});
       else if (action==='delete') deleteQuiz(id);
       else if (action==='share') showShareModal(id);
+      else if (action==='lock') toggleQuizLock(id);
+      else if (action==='accesses') showAccessesModal(id);
     });
   });
   document.querySelectorAll('.quiz-card').forEach(el=>{
@@ -860,9 +883,202 @@ function deleteQuiz(id) {
     state.quizzes = state.quizzes.filter(q=>q.id!==id);
     saveStorage(STORAGE.QUIZZES, state.quizzes);
     toast(t('deletedSuccess'), 'success');
-    // Delete from server in background
     API.deleteQuiz(id).catch(()=>{});
     renderPageContent();
+  });
+}
+
+async function toggleQuizLock(id) {
+  const quiz = state.quizzes.find(q=>q.id===id);
+  if (!quiz) return;
+  const newLocked = !quiz.isLocked;
+  // Оптимистично обновляем UI
+  quiz.isLocked = newLocked;
+  saveStorage(STORAGE.QUIZZES, state.quizzes);
+  renderPageContent();
+  toast(newLocked
+    ? (LANG==='ru'?'🔒 Тест закрыт. Никто не сможет найти его по коду.':'🔒 Test yopildi.')
+    : (LANG==='ru'?'🔓 Тест открыт. Теперь доступен по коду.':'🔓 Test ochildi.'),
+    newLocked ? 'warning' : 'success', 4000);
+  // Синхронизируем с сервером
+  if (getAuthToken()) {
+    const r = await API.lockQuiz(id, newLocked);
+    if (!r.ok) {
+      // Откат если ошибка
+      quiz.isLocked = !newLocked;
+      saveStorage(STORAGE.QUIZZES, state.quizzes);
+      renderPageContent();
+      toast(LANG==='ru'?'Ошибка: нужно войти в аккаунт':'Xato: akkauntga kirishingiz kerak', 'error');
+    }
+  } else {
+    toast(LANG==='ru'?'Войдите в аккаунт чтобы блокировка сохранилась на сервере':'Bloklashni saqlash uchun akkauntga kiring', 'warning', 4000);
+  }
+}
+
+async function showAccessesModal(id) {
+  const quiz = state.quizzes.find(q=>q.id===id);
+  if (!quiz) return;
+
+  showModal(`
+<div class="modal-header">
+  <i class="fas fa-users" style="color:var(--primary)"></i>
+  <span class="modal-title">${escHtml(quiz.title)}</span>
+  <button class="btn btn-icon btn-secondary" onclick="closeModal()"><i class="fas fa-times"></i></button>
+</div>
+<div class="modal-body" id="accesses-modal-body">
+  <div style="text-align:center;padding:30px;"><i class="fas fa-spinner fa-spin" style="font-size:24px;color:var(--primary)"></i></div>
+</div>`);
+
+  if (!getAuthToken()) {
+    document.getElementById('accesses-modal-body').innerHTML = `
+      <div style="text-align:center;padding:20px;color:var(--text-muted)">
+        <i class="fas fa-lock" style="font-size:32px;margin-bottom:12px;color:var(--warning)"></i>
+        <div>${LANG==='ru'?'Войдите в аккаунт чтобы увидеть историю доступа':'Kirish tarixini ko\'rish uchun akkauntga kiring'}</div>
+      </div>`;
+    return;
+  }
+
+  // Загружаем параллельно: доступы и попытки
+  const [rAccess, rAttempts] = await Promise.all([
+    API.getAccesses(id).catch(()=>null),
+    API.getAnalytics(id).catch(()=>null)
+  ]);
+
+  const body = document.getElementById('accesses-modal-body');
+  if (!body) return;
+
+  const accesses = rAccess?.accesses || rAccess?.data?.accesses || [];
+  const attempts = rAttempts?.attempts || [];
+  const stats = rAttempts?.stats || {};
+
+  body.innerHTML = `
+<!-- Заголовок с кодом -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px;padding:12px 16px;background:rgba(59,130,246,0.07);border-radius:10px;border:1px solid rgba(59,130,246,0.15);">
+  <span style="font-size:13px;color:var(--text-muted)">${LANG==='ru'?'Код':'Kod'}:</span>
+  <b style="font-size:15px;color:var(--primary);">${quiz.code}</b>
+  <span style="font-size:13px;color:var(--text-muted)">PIN:</span>
+  <b style="font-size:15px;">${quiz.pin}</b>
+  <span style="margin-left:auto;font-size:12px;color:var(--text-muted)">${LANG==='ru'?'Участников с доступом':'Kirish bilan ishtirokchilar'}: <b style="color:var(--primary)">${accesses.length}</b></span>
+  <span style="font-size:12px;color:var(--text-muted)">${LANG==='ru'?'Прохождений':'Urinishlar'}: <b style="color:var(--success)">${attempts.length}</b></span>
+</div>
+
+<!-- Вкладки -->
+<div style="display:flex;gap:4px;margin-bottom:16px;">
+  <button class="btn btn-primary btn-sm" id="tab-accesses-btn" style="border-radius:8px 8px 0 0;">${LANG==='ru'?'Кто открывал':'Kim ochdi'} (${accesses.length})</button>
+  <button class="btn btn-secondary btn-sm" id="tab-attempts-btn" style="border-radius:8px 8px 0 0;">${LANG==='ru'?'Кто проходил':'Kim topshirdi'} (${attempts.length})</button>
+</div>
+
+<!-- Вкладка доступы -->
+<div id="tab-accesses-content">
+${accesses.length ? `
+<div style="max-height:340px;overflow-y:auto;">
+  <table class="history-table">
+    <thead><tr>
+      <th>#</th>
+      <th>${LANG==='ru'?'Никнейм / Имя':'Nickname / Ism'}</th>
+      <th>Email</th>
+      <th>${LANG==='ru'?'Тип':'Tur'}</th>
+      <th>${LANG==='ru'?'Последний вход':'Oxirgi kirish'}</th>
+    </tr></thead>
+    <tbody>
+    ${accesses.map((a, i) => `
+    <tr>
+      <td style="color:var(--text-muted)">${i+1}</td>
+      <td>
+        <span style="font-size:16px;margin-right:6px;">${a.userAvatar && a.userAvatar.length<=4 ? escHtml(a.userAvatar) : '🧑'}</span>
+        <b>${escHtml(a.userName||'Гость')}</b>
+      </td>
+      <td style="font-size:13px;color:var(--text-muted)">${a.userEmail ? escHtml(a.userEmail) : '—'}</td>
+      <td>
+        ${a.userId
+          ? `<span class="badge badge-success" style="font-size:11px">${LANG==='ru'?'Аккаунт':'Akkaunt'}</span>`
+          : `<span class="badge badge-secondary" style="font-size:11px">${LANG==='ru'?'Гость':'Mehmon'}</span>`}
+      </td>
+      <td style="font-size:12px;color:var(--text-muted)">${a.accessedAt ? new Date(a.accessedAt*1000).toLocaleString(LANG==='ru'?'ru-RU':'uz-UZ') : '—'}</td>
+    </tr>`).join('')}
+    </tbody>
+  </table>
+</div>` : `
+<div style="text-align:center;padding:30px;color:var(--text-muted)">
+  <i class="fas fa-user-slash" style="font-size:32px;margin-bottom:12px;opacity:0.4"></i>
+  <div>${LANG==='ru'?'Никто ещё не открывал этот тест':'Hali hech kim bu testni ochmagandi'}</div>
+</div>`}
+</div>
+
+<!-- Вкладка прохождения -->
+<div id="tab-attempts-content" style="display:none">
+${attempts.length ? `
+<div style="margin-bottom:12px;display:flex;gap:16px;flex-wrap:wrap;">
+  <span style="font-size:13px;color:var(--text-muted)">${LANG==='ru'?'Ср. результат':'O\'rt. natija'}: <b style="color:var(--primary)">${stats.avgPercent||0}%</b></span>
+  <span style="font-size:13px;color:var(--text-muted)">${LANG==='ru'?'Прошли':'O\'tdi'}: <b style="color:var(--success)">${stats.passedCount||0}</b></span>
+  <span style="font-size:13px;color:var(--text-muted)">${LANG==='ru'?'Ср. время':'O\'rt. vaqt'}: <b>${stats.avgDuration?formatTime(stats.avgDuration):'—'}</b></span>
+</div>
+<div style="max-height:340px;overflow-y:auto;">
+  <table class="history-table">
+    <thead><tr>
+      <th>#</th>
+      <th>${LANG==='ru'?'Участник':'Ishtirokchi'}</th>
+      <th>${t('score')}</th>
+      <th>${t('correct')}</th>
+      <th>${t('wrong')}</th>
+      <th>${t('duration')}</th>
+      <th>${t('created')}</th>
+    </tr></thead>
+    <tbody>
+    ${attempts.map((a, i) => `
+    <tr>
+      <td style="color:var(--text-muted)">${i+1}</td>
+      <td><b>${escHtml(a.userName||'Гость')}</b></td>
+      <td><span class="badge ${a.passed?'badge-success':'badge-danger'}">${a.percent}%</span></td>
+      <td style="color:var(--success)">${a.correct}</td>
+      <td style="color:var(--danger)">${a.wrong}</td>
+      <td>${a.duration?formatTime(a.duration):'—'}</td>
+      <td style="font-size:12px;color:var(--text-muted)">${a.createdAt?new Date(a.createdAt*1000).toLocaleString(LANG==='ru'?'ru-RU':'uz-UZ'):'—'}</td>
+    </tr>`).join('')}
+    </tbody>
+  </table>
+</div>` : `
+<div style="text-align:center;padding:30px;color:var(--text-muted)">
+  <i class="fas fa-clipboard-list" style="font-size:32px;margin-bottom:12px;opacity:0.4"></i>
+  <div>${LANG==='ru'?'Этот тест ещё никто не проходил':'Bu testni hali hech kim topshirmagan'}</div>
+</div>`}
+</div>
+
+<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+  <button class="btn btn-secondary btn-sm" id="btn-export-accesses"><i class="fas fa-download"></i> CSV ${LANG==='ru'?'доступы':'kirish'}</button>
+  <button class="btn btn-secondary btn-sm" id="btn-export-att"><i class="fas fa-download"></i> CSV ${LANG==='ru'?'прохождения':'urinishlar'}</button>
+</div>`;
+
+  // Переключение вкладок
+  document.getElementById('tab-accesses-btn')?.addEventListener('click', () => {
+    document.getElementById('tab-accesses-content').style.display = '';
+    document.getElementById('tab-attempts-content').style.display = 'none';
+    document.getElementById('tab-accesses-btn').className = 'btn btn-primary btn-sm';
+    document.getElementById('tab-attempts-btn').className = 'btn btn-secondary btn-sm';
+  });
+  document.getElementById('tab-attempts-btn')?.addEventListener('click', () => {
+    document.getElementById('tab-accesses-content').style.display = 'none';
+    document.getElementById('tab-attempts-content').style.display = '';
+    document.getElementById('tab-accesses-btn').className = 'btn btn-secondary btn-sm';
+    document.getElementById('tab-attempts-btn').className = 'btn btn-primary btn-sm';
+  });
+
+  // Экспорт доступов
+  document.getElementById('btn-export-accesses')?.addEventListener('click', () => {
+    const rows = [['#','Имя','Email','Тип','Дата входа'].join(',')];
+    accesses.forEach((a,i) => {
+      rows.push([i+1, `"${(a.userName||'').replace(/"/g,'""')}"`, `"${(a.userEmail||'').replace(/"/g,'""')}"`,
+        a.userId ? 'Аккаунт' : 'Гость',
+        a.accessedAt ? new Date(a.accessedAt*1000).toLocaleString('ru-RU') : ''].join(','));
+    });
+    const blob = new Blob(['\uFEFF'+rows.join('\n')], {type:'text/csv;charset=utf-8;'});
+    const link = document.createElement('a'); link.href = URL.createObjectURL(blob);
+    link.download = `accesses_${quiz.code}.csv`; link.click();
+  });
+
+  // Экспорт прохождений
+  document.getElementById('btn-export-att')?.addEventListener('click', () => {
+    exportAdminCSV(attempts, `attempts_${quiz.code}`);
   });
 }
 
@@ -933,6 +1149,100 @@ function showShareModal(id) {
 function downloadJson(data, filename) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FOUND QUIZZES — чужие тесты найденные по коду+PIN
+// ═══════════════════════════════════════════════════════════════
+function renderFoundQuizzes() {
+  const titleEl = document.getElementById('topbar-title');
+  const actionsEl = document.getElementById('topbar-actions');
+  const area = document.getElementById('content-area');
+  if (!area) return;
+  if (titleEl) titleEl.textContent = LANG==='ru'?'Найденные тесты':'Topilgan testlar';
+  if (actionsEl) actionsEl.innerHTML = `
+    <button class="btn btn-secondary btn-sm" id="btn-clear-found" title="${LANG==='ru'?'Очистить список':'Ro\'yxatni tozalash'}"><i class="fas fa-trash"></i> ${LANG==='ru'?'Очистить':'Tozalash'}</button>`;
+
+  const fq = state.foundQuizzes;
+
+  area.innerHTML = `
+<div style="margin-bottom:16px;padding:14px 18px;background:rgba(59,130,246,0.07);border-radius:12px;border:1px solid rgba(59,130,246,0.2);">
+  <i class="fas fa-info-circle" style="color:var(--primary)"></i>
+  <span style="font-size:14px;color:var(--text-muted);margin-left:8px;">${LANG==='ru'
+    ? 'Здесь отображаются тесты, найденные по коду от других авторов. Они не входят в раздел «Мои тесты».'
+    : 'Bu yerda boshqa mualliflarning kodi orqali topilgan testlar ko\'rsatiladi.'}</span>
+</div>
+
+${fq.length ? `
+<div class="grid-auto" id="found-quizzes-grid">
+  ${fq.map(q => `
+  <div class="quiz-card found-quiz-card" style="border:2px solid rgba(99,102,241,0.25);" data-quiz-id="${q.id}">
+    <div class="quiz-card-header">
+      <span class="badge badge-primary" style="background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);">${escHtml(q.category||'Без категории')}</span>
+      ${q.isLocked ? `<span class="badge badge-danger" style="margin-left:6px"><i class="fas fa-lock"></i> ${LANG==='ru'?'Закрыт':'Yopiq'}</span>` : ''}
+    </div>
+    <div class="quiz-card-title">${escHtml(q.title)}</div>
+    ${q.description ? `<div class="quiz-card-desc">${escHtml(q.description)}</div>` : ''}
+    <div class="quiz-card-meta">
+      <span><i class="fas fa-question-circle"></i> ${q.questions?.length||0} ${LANG==='ru'?'вопросов':'savol'}</span>
+      <span><i class="fas fa-percentage"></i> ${q.passingScore||60}%</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;padding:8px 0 4px;border-top:1px solid var(--border);margin-top:8px;">
+      <div style="font-size:12px;color:var(--text-muted);flex:1;">
+        <span style="background:rgba(59,130,246,0.1);color:#3b82f6;padding:2px 8px;border-radius:20px;font-weight:700;">#${q.code}</span>
+        <span style="margin-left:6px;color:var(--text-muted)">PIN: ${q.pin}</span>
+      </div>
+    </div>
+    <div class="quiz-card-actions" style="margin-top:8px;display:flex;gap:8px;">
+      <button class="btn btn-primary btn-sm" data-found-start="${q.id}" ${q.isLocked?'disabled':''}>
+        <i class="fas fa-play"></i> ${q.isLocked ? (LANG==='ru'?'Закрыт':'Yopiq') : t('startQuiz')}
+      </button>
+      <button class="btn btn-danger btn-sm btn-icon" data-found-remove="${q.id}" title="${LANG==='ru'?'Удалить из списка':'Ro\'yxatdan o\'chirish'}">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+  </div>`).join('')}
+</div>` : `
+<div class="empty-state">
+  <div class="empty-state-icon"><i class="fas fa-search"></i></div>
+  <div class="empty-state-title">${LANG==='ru'?'Нет найденных тестов':'Topilgan testlar yo\'q'}</div>
+  <div class="empty-state-text">${LANG==='ru'?'Введите код и PIN теста на главной странице чтобы найти тест другого автора':'Boshqa muallifning testini topish uchun asosiy sahifada kod va PIN kiriting'}</div>
+  <button class="btn btn-primary" id="btn-go-home-found"><i class="fas fa-search"></i> ${LANG==='ru'?'Найти тест':'Test qidirish'}</button>
+</div>`}`;
+
+  document.getElementById('btn-go-home-found')?.addEventListener('click', ()=>navigate('home'));
+  document.getElementById('btn-clear-found')?.addEventListener('click', ()=>{
+    confirm(LANG==='ru'?'Очистить список найденных тестов?':'Topilgan testlar ro\'yxatini tozalash?', ()=>{
+      state.foundQuizzes = [];
+      saveStorage(STORAGE.FOUND_QUIZZES, []);
+      renderFoundQuizzes();
+    });
+  });
+
+  document.querySelectorAll('[data-found-start]').forEach(el=>{
+    el.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const quiz = state.foundQuizzes.find(q=>q.id===el.dataset.foundStart);
+      if (quiz && !quiz.isLocked) {
+        API.recordAccess(quiz.id, state.user?.name||'Гость').catch(()=>{});
+        showStartScreen(quiz, {});
+      }
+    });
+  });
+  document.querySelectorAll('[data-found-remove]').forEach(el=>{
+    el.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      state.foundQuizzes = state.foundQuizzes.filter(q=>q.id!==el.dataset.foundRemove);
+      saveStorage(STORAGE.FOUND_QUIZZES, state.foundQuizzes);
+      renderFoundQuizzes();
+    });
+  });
+  document.querySelectorAll('.found-quiz-card').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const quiz = state.foundQuizzes.find(q=>q.id===el.dataset.quizId);
+      if (quiz && !quiz.isLocked) { API.recordAccess(quiz.id, state.user?.name||'Гость').catch(()=>{}); showStartScreen(quiz, {}); }
+    });
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1474,6 +1784,9 @@ function launchQuiz(quiz, overrides={}) {
   if (quiz.shuffleQuestions) order = shuffle(order);
   if (maxQ > 0) order = order.slice(0, maxQ);
 
+  // Записываем факт доступа на сервер
+  API.recordAccess(quiz.id, state.user?.name || 'Гость').catch(()=>{});
+
   state.currentQuiz = quiz;
   state.questionOrder = order;
   state.currentQuestion = 0;
@@ -1797,6 +2110,18 @@ function finishQuiz() {
   state.history.unshift(histEntry);
   saveStorage(STORAGE.HISTORY, state.history);
 
+  // Сохраняем попытку на сервер в фоне
+  if (getAuthToken()) {
+    API.saveAttempt({
+      quizId: quiz.id,
+      percent: pct,
+      correct, wrong, skipped, total, passed,
+      duration,
+      userName: state.user?.name || 'Гость',
+      answers: details
+    }).catch(()=>{});
+  }
+
   state.lastResult = { correct, wrong, skipped, total, percent: pct, passed, duration, details, quiz };
   navigate('results');
 }
@@ -2023,78 +2348,241 @@ ${h.length ? `
 function renderAdmin() {
   const area = document.getElementById('content-area');
   const titleEl = document.getElementById('topbar-title');
+  const actionsEl = document.getElementById('topbar-actions');
   if (!area) return;
   if (titleEl) titleEl.textContent = t('admin');
+  if (actionsEl) actionsEl.innerHTML = `
+    <button class="btn btn-secondary btn-sm" id="btn-admin-refresh"><i class="fas fa-sync-alt"></i> ${LANG==='ru'?'Обновить':'Yangilash'}</button>
+    <button class="btn btn-success btn-sm" id="btn-admin-export-csv"><i class="fas fa-file-csv"></i> ${LANG==='ru'?'Скачать CSV':'CSV yuklab olish'}</button>`;
 
-  const h = state.history;
-  const quizStats = state.quizzes.map(quiz=>{
-    const attempts = h.filter(x=>x.quizId===quiz.id);
-    return {
-      quiz,
-      attempts: attempts.length,
-      avgScore: attempts.length ? Math.round(attempts.reduce((s,x)=>s+x.percent,0)/attempts.length) : 0,
-      passRate: attempts.length ? Math.round(attempts.filter(x=>x.passed).length/attempts.length*100) : 0,
-    };
-  }).sort((a,b)=>b.attempts-a.attempts);
+  area.innerHTML = `<div style="text-align:center;padding:60px;"><i class="fas fa-spinner fa-spin" style="font-size:28px;color:var(--primary)"></i><div style="margin-top:12px;color:var(--text-muted)">${LANG==='ru'?'Загружаем аналитику…':'Tahlil yuklanmoqda…'}</div></div>`;
 
-  const maxAttempts = Math.max(1,...quizStats.map(s=>s.attempts));
+  async function loadAdminData() {
+    if (!getAuthToken()) {
+      area.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon"><i class="fas fa-lock"></i></div>
+        <div class="empty-state-title">${LANG==='ru'?'Требуется вход':'Kirish talab qilinadi'}</div>
+        <div class="empty-state-text">${LANG==='ru'?'Войдите в аккаунт чтобы видеть статистику своих тестов':'Testlar statistikasini ko\'rish uchun akkauntga kiring'}</div>
+        <button class="btn btn-primary" id="btn-admin-login"><i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}</button>
+      </div>`;
+      document.getElementById('btn-admin-login')?.addEventListener('click', () => showAuthScreen(() => renderAdmin()));
+      return;
+    }
 
-  area.innerHTML = `
+    const r = await API.getAdminOverview().catch(() => null);
+    if (!r || !r.ok) {
+      area.innerHTML = `<div style="padding:40px;text-align:center;color:var(--danger)"><i class="fas fa-exclamation-triangle"></i> ${LANG==='ru'?'Ошибка загрузки данных':'Ma\'lumotlarni yuklashda xatolik'}</div>`;
+      return;
+    }
+
+    const { totalAttempts, totalUsers, recentAttempts, quizzes: qStats } = r;
+    const allAttempts = recentAttempts || [];
+    const maxAttempts = Math.max(1, ...qStats.map(s => s.attemptCount));
+    const overallAvg = qStats.length ? Math.round(qStats.reduce((s, q) => s + (q.avgPercent || 0), 0) / qStats.length) : 0;
+    const passRate = totalAttempts ? Math.round(allAttempts.filter(a => a.passed).length / Math.min(allAttempts.length, totalAttempts) * 100) : 0;
+
+    // Сохраняем данные для экспорта
+    window._adminData = { qStats, allAttempts, totalAttempts, totalUsers };
+
+    area.innerHTML = `
 <div class="grid-4" style="margin-bottom:24px">
-  <div class="stat-card"><div class="stat-icon stat-icon-blue"><i class="fas fa-layer-group"></i></div><div><div class="stat-value">${state.quizzes.length}</div><div class="stat-label">${t('quizzes')}</div></div></div>
-  <div class="stat-card"><div class="stat-icon stat-icon-green"><i class="fas fa-users"></i></div><div><div class="stat-value">${h.length}</div><div class="stat-label">${t('totalAttempts')}</div></div></div>
-  <div class="stat-card"><div class="stat-icon stat-icon-orange"><i class="fas fa-percent"></i></div><div><div class="stat-value">${h.length?Math.round(h.reduce((s,x)=>s+x.percent,0)/h.length):0}%</div><div class="stat-label">${t('avgScore')}</div></div></div>
-  <div class="stat-card"><div class="stat-icon stat-icon-purple"><i class="fas fa-trophy"></i></div><div><div class="stat-value">${h.length?Math.round(h.filter(x=>x.passed).length/h.length*100):0}%</div><div class="stat-label">${LANG==='ru'?'Процент сдачи':'O\'tish foizi'}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-blue"><i class="fas fa-layer-group"></i></div><div><div class="stat-value">${qStats.length}</div><div class="stat-label">${t('quizzes')}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-green"><i class="fas fa-users"></i></div><div><div class="stat-value">${totalAttempts}</div><div class="stat-label">${t('totalAttempts')}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-orange"><i class="fas fa-percent"></i></div><div><div class="stat-value">${overallAvg}%</div><div class="stat-label">${t('avgScore')}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-purple"><i class="fas fa-trophy"></i></div><div><div class="stat-value">${passRate}%</div><div class="stat-label">${LANG==='ru'?'Процент сдачи':'O\'tish foizi'}</div></div></div>
 </div>
 
 <div class="grid-2" style="margin-bottom:24px">
   <div class="analytics-chart">
     <div style="font-size:16px;font-weight:700;margin-bottom:16px">${LANG==='ru'?'Попытки по тестам':'Testlar bo\'yicha urinishlar'}</div>
-    ${quizStats.length ? quizStats.slice(0,8).map(s=>`
+    ${qStats.length ? qStats.slice(0,8).map(s=>`
     <div class="chart-bar-row">
-      <div class="chart-bar-label" title="${escHtml(s.quiz.title)}">${escHtml(s.quiz.title)}</div>
-      <div class="chart-bar-wrap"><div class="chart-bar-fill blue" style="width:${Math.round(s.attempts/maxAttempts*100)}%"><span class="chart-bar-val">${s.attempts}</span></div></div>
+      <div class="chart-bar-label" title="${escHtml(s.title)}">${escHtml(s.title)}</div>
+      <div class="chart-bar-wrap"><div class="chart-bar-fill blue" style="width:${Math.round(s.attemptCount/maxAttempts*100)}%"><span class="chart-bar-val">${s.attemptCount}</span></div></div>
     </div>`).join('') : `<div style="color:var(--text-muted);font-size:14px;padding:20px;text-align:center">${LANG==='ru'?'Нет данных':'Ma\'lumot yo\'q'}</div>`}
   </div>
   <div class="analytics-chart">
     <div style="font-size:16px;font-weight:700;margin-bottom:16px">${t('avgScore')} %</div>
-    ${quizStats.length ? quizStats.slice(0,8).map(s=>`
+    ${qStats.length ? qStats.slice(0,8).map(s=>`
     <div class="chart-bar-row">
-      <div class="chart-bar-label" title="${escHtml(s.quiz.title)}">${escHtml(s.quiz.title)}</div>
-      <div class="chart-bar-wrap"><div class="chart-bar-fill ${s.avgScore>=70?'green':s.avgScore>=40?'orange':'red'}" style="width:${s.avgScore}%"><span class="chart-bar-val">${s.avgScore}%</span></div></div>
+      <div class="chart-bar-label" title="${escHtml(s.title)}">${escHtml(s.title)}</div>
+      <div class="chart-bar-wrap"><div class="chart-bar-fill ${(s.avgPercent||0)>=70?'green':(s.avgPercent||0)>=40?'orange':'red'}" style="width:${s.avgPercent||0}%"><span class="chart-bar-val">${s.avgPercent||0}%</span></div></div>
     </div>`).join('') : `<div style="color:var(--text-muted);font-size:14px;padding:20px;text-align:center">${LANG==='ru'?'Нет данных':'Ma\'lumot yo\'q'}</div>`}
   </div>
 </div>
 
-<div class="card">
-  <div style="font-size:16px;font-weight:700;margin-bottom:16px">${LANG==='ru'?'Список тестов':'Testlar ro\'yxati'}</div>
+<div class="card" style="margin-bottom:24px">
+  <div style="font-size:16px;font-weight:700;margin-bottom:16px">${LANG==='ru'?'Список тестов (подробно)':'Testlar ro\'yxati (batafsil)'}</div>
   <div style="overflow-x:auto">
   <table class="history-table">
     <thead><tr>
-      <th>${t('quizTitle')}</th><th>${t('category')}</th><th>${LANG==='ru'?'Вопросов':'Savollar'}</th><th>${t('totalAttempts')}</th><th>${t('avgScore')}</th><th>${LANG==='ru'?'Прошли':'O\'tdi'}</th><th>${t('created')}</th><th></th>
+      <th>${t('quizTitle')}</th>
+      <th>${t('category')}</th>
+      <th>${LANG==='ru'?'Вопросов':'Savollar'}</th>
+      <th>${t('totalAttempts')}</th>
+      <th>${t('avgScore')}</th>
+      <th>${LANG==='ru'?'Прошли':'O\'tdi'}</th>
+      <th>${LANG==='ru'?'Ср.время':'O\'rt.vaqt'}</th>
+      <th>${t('created')}</th>
+      <th></th>
     </tr></thead>
     <tbody>
-      ${quizStats.map(s=>`
+      ${qStats.map(s=>`
       <tr>
-        <td><b>${escHtml(s.quiz.title)}</b></td>
-        <td><span class="badge badge-primary">${escHtml(s.quiz.category||'—')}</span></td>
-        <td>${s.quiz.questions?.length||0}</td>
-        <td>${s.attempts}</td>
-        <td><span class="badge ${s.avgScore>=s.quiz.passingScore?'badge-success':'badge-danger'}">${s.avgScore}%</span></td>
-        <td>${s.passRate}%</td>
-        <td style="font-size:12px;color:var(--text-muted)">${new Date(s.quiz.created).toLocaleDateString(LANG==='ru'?'ru-RU':'uz-UZ')}</td>
-        <td style="display:flex;gap:6px">
-          <button class="btn btn-icon-sm btn-secondary" data-admin-start="${s.quiz.id}"><i class="fas fa-play"></i></button>
-          <button class="btn btn-icon-sm btn-secondary" data-admin-edit="${s.quiz.id}"><i class="fas fa-pen"></i></button>
+        <td><b>${escHtml(s.title)}</b></td>
+        <td><span class="badge badge-primary">${escHtml(s.category||'—')}</span></td>
+        <td>${s.questions?.length||0}</td>
+        <td><b>${s.attemptCount}</b></td>
+        <td><span class="badge ${(s.avgPercent||0)>=(s.passingScore||60)?'badge-success':'badge-danger'}">${s.avgPercent||0}%</span></td>
+        <td>${s.passRate||0}%</td>
+        <td style="color:var(--text-muted)">${s.avgDuration ? formatTime(s.avgDuration) : '—'}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${s.createdAt ? new Date(s.createdAt*1000).toLocaleDateString(LANG==='ru'?'ru-RU':'uz-UZ') : '—'}</td>
+        <td style="display:flex;gap:6px;flex-wrap:nowrap">
+          <button class="btn btn-icon-sm btn-secondary" data-admin-start="${s.id}" title="${t('startQuiz')}"><i class="fas fa-play"></i></button>
+          <button class="btn btn-icon-sm btn-secondary" data-admin-edit="${s.id}" title="${t('editQuiz')}"><i class="fas fa-pen"></i></button>
+          <button class="btn btn-icon-sm btn-primary" data-admin-details="${s.id}" title="${LANG==='ru'?'Подробные результаты':'Batafsil natijalar'}"><i class="fas fa-chart-bar"></i></button>
         </td>
       </tr>`).join('')}
     </tbody>
   </table>
   </div>
-</div>`;
+</div>
 
-  document.querySelectorAll('[data-admin-start]').forEach(el=>el.addEventListener('click',()=>startQuiz(el.dataset.adminStart)));
-  document.querySelectorAll('[data-admin-edit]').forEach(el=>el.addEventListener('click',()=>navigate('edit-quiz',{id:el.dataset.adminEdit})));
+${allAttempts.length ? `
+<div class="card">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+    <div style="font-size:16px;font-weight:700">${LANG==='ru'?'Последние прохождения':'Oxirgi urinishlar'} (${allAttempts.length})</div>
+    <button class="btn btn-secondary btn-sm" id="btn-admin-dl-recent"><i class="fas fa-download"></i> ${LANG==='ru'?'Скачать':'Yuklab olish'}</button>
+  </div>
+  <div style="overflow-x:auto">
+  <table class="history-table">
+    <thead><tr>
+      <th>#</th><th>${LANG==='ru'?'Тест':'Test'}</th><th>${LANG==='ru'?'Участник':'Ishtirokchi'}</th><th>${t('score')}</th><th>${t('correct')}</th><th>${t('wrong')}</th><th>${t('duration')}</th><th>${t('created')}</th>
+    </tr></thead>
+    <tbody>
+      ${allAttempts.map((a,i)=>`
+      <tr>
+        <td style="color:var(--text-muted)">${i+1}</td>
+        <td><b>${escHtml(a.quizTitle||'—')}</b></td>
+        <td>${escHtml(a.userName||'Гость')}</td>
+        <td><span class="badge ${a.passed?'badge-success':'badge-danger'}">${a.percent}%</span></td>
+        <td style="color:var(--success)">${a.correct??'—'}</td>
+        <td style="color:var(--danger)">${a.wrong??'—'}</td>
+        <td>${a.duration ? formatTime(a.duration) : '—'}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${a.createdAt ? new Date(a.createdAt*1000).toLocaleString(LANG==='ru'?'ru-RU':'uz-UZ') : '—'}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  </div>
+</div>` : ''}`;
+
+    // Кнопки таблицы тестов
+    document.querySelectorAll('[data-admin-start]').forEach(el=>el.addEventListener('click',()=>startQuiz(el.dataset.adminStart)));
+    document.querySelectorAll('[data-admin-edit]').forEach(el=>el.addEventListener('click',()=>navigate('edit-quiz',{id:el.dataset.adminEdit})));
+    document.querySelectorAll('[data-admin-details]').forEach(el=>el.addEventListener('click',()=>showAdminQuizDetails(el.dataset.adminDetails, qStats)));
+
+    // Скачать последние прохождения
+    document.getElementById('btn-admin-dl-recent')?.addEventListener('click',()=>{
+      exportAdminCSV(allAttempts, 'recent-attempts');
+    });
+  }
+
+  loadAdminData();
+
+  // Кнопка обновить в topbar
+  document.getElementById('btn-admin-refresh')?.addEventListener('click',()=>renderAdmin());
+
+  // Кнопка скачать всё CSV
+  document.getElementById('btn-admin-export-csv')?.addEventListener('click',()=>{
+    if (window._adminData) exportAdminCSV(window._adminData.allAttempts, 'all-attempts');
+    else toast(LANG==='ru'?'Данные ещё не загружены':'Ma\'lumotlar hali yuklanmagan','warning');
+  });
+}
+
+// Подробные результаты по конкретному тесту (модальное окно)
+async function showAdminQuizDetails(quizId, cachedStats) {
+  const quiz = cachedStats?.find(q => q.id === quizId) || state.quizzes.find(q => q.id === quizId);
+  showModal(`
+<div class="modal-header">
+  <i class="fas fa-chart-bar" style="color:var(--primary)"></i>
+  <span class="modal-title">${escHtml(quiz?.title || quizId)}</span>
+  <button class="btn btn-icon btn-secondary" onclick="closeModal()"><i class="fas fa-times"></i></button>
+</div>
+<div class="modal-body" id="quiz-details-body">
+  <div style="text-align:center;padding:30px"><i class="fas fa-spinner fa-spin" style="font-size:24px;color:var(--primary)"></i></div>
+</div>`);
+
+  const r = await API.getAnalytics(quizId).catch(()=>null);
+  const body = document.getElementById('quiz-details-body');
+  if (!body) return;
+  if (!r || !r.ok) {
+    body.innerHTML = `<div style="color:var(--danger);text-align:center;padding:20px">${LANG==='ru'?'Ошибка загрузки':'Yuklab olishda xatolik'}</div>`;
+    return;
+  }
+
+  const { stats, attempts } = r;
+  body.innerHTML = `
+<div class="grid-4" style="margin-bottom:20px">
+  <div class="stat-card"><div class="stat-icon stat-icon-blue"><i class="fas fa-users"></i></div><div><div class="stat-value">${stats.total}</div><div class="stat-label">${t('totalAttempts')}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-green"><i class="fas fa-percent"></i></div><div><div class="stat-value">${stats.avgPercent}%</div><div class="stat-label">${t('avgScore')}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-orange"><i class="fas fa-trophy"></i></div><div><div class="stat-value">${stats.passedCount}</div><div class="stat-label">${LANG==='ru'?'Прошли':'O\'tdi'}</div></div></div>
+  <div class="stat-card"><div class="stat-icon stat-icon-purple"><i class="fas fa-clock"></i></div><div><div class="stat-value">${stats.avgDuration?formatTime(stats.avgDuration):'—'}</div><div class="stat-label">${LANG==='ru'?'Ср.время':'O\'rt.vaqt'}</div></div></div>
+</div>
+<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+  <button class="btn btn-secondary btn-sm" id="btn-dl-quiz-csv"><i class="fas fa-download"></i> ${LANG==='ru'?'Скачать CSV':'CSV yuklab olish'}</button>
+</div>
+${attempts.length ? `
+<div style="overflow-x:auto">
+<table class="history-table">
+  <thead><tr>
+    <th>#</th><th>${LANG==='ru'?'Участник':'Ishtirokchi'}</th><th>${t('score')}</th><th>${t('correct')}</th><th>${t('wrong')}</th><th>${t('skipped')}</th><th>${t('duration')}</th><th>${t('created')}</th>
+  </tr></thead>
+  <tbody>
+    ${attempts.map((a,i)=>`
+    <tr>
+      <td>${i+1}</td>
+      <td>${escHtml(a.userName||'Гость')}</td>
+      <td><span class="badge ${a.passed?'badge-success':'badge-danger'}">${a.percent}%</span></td>
+      <td style="color:var(--success)">${a.correct}</td>
+      <td style="color:var(--danger)">${a.wrong}</td>
+      <td style="color:var(--text-muted)">${a.skipped}</td>
+      <td>${a.duration?formatTime(a.duration):'—'}</td>
+      <td style="font-size:12px;color:var(--text-muted)">${a.createdAt?new Date(a.createdAt*1000).toLocaleString(LANG==='ru'?'ru-RU':'uz-UZ'):'—'}</td>
+    </tr>`).join('')}
+  </tbody>
+</table>
+</div>` : `<div style="text-align:center;padding:20px;color:var(--text-muted)">${LANG==='ru'?'Прохождений ещё нет':'Hali urinishlar yo\'q'}</div>`}`;
+
+  document.getElementById('btn-dl-quiz-csv')?.addEventListener('click', ()=>{
+    exportAdminCSV(attempts, (quiz?.title||quizId).replace(/[^a-zA-Z0-9а-яА-Я]/g,'_').substring(0,30));
+  });
+}
+
+// Экспорт прохождений в CSV
+function exportAdminCSV(attempts, filename) {
+  if (!attempts || !attempts.length) { toast(LANG==='ru'?'Нет данных для экспорта':'Eksport uchun ma\'lumot yo\'q','warning'); return; }
+  const headers = ['#','Тест','Участник','Результат %','Правильно','Неправильно','Пропущено','Итог','Время','Дата'];
+  const rows = attempts.map((a,i) => [
+    i+1,
+    `"${(a.quizTitle||a.quiz?.title||'').replace(/"/g,'""')}"`,
+    `"${(a.userName||'Гость').replace(/"/g,'""')}"`,
+    a.percent,
+    a.correct??'',
+    a.wrong??'',
+    a.skipped??'',
+    a.passed?(LANG==='ru'?'Прошёл':'O\'tdi'):(LANG==='ru'?'Не прошёл':'O\'tmadi'),
+    a.duration?formatTime(a.duration):'',
+    a.createdAt?new Date(a.createdAt*1000).toLocaleString('ru-RU'):''
+  ]);
+  const csv = '\uFEFF' + [headers, ...rows].map(r=>r.join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `${filename || 'attempts'}_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast(LANG==='ru'?'CSV файл скачан':'CSV fayl yuklab olindi','success');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3167,16 +3655,10 @@ function attachFindQuizEvents() {
 
   if (!codeInput || !pinInput || !btn) return;
 
-  // Auto-format: digits only
   [codeInput, pinInput].forEach(inp=>{
-    inp.addEventListener('input', ()=>{
-      inp.value = inp.value.replace(/\D/g,'');
-    });
-    inp.addEventListener('keydown', e=>{
-      if (e.key==='Enter') btn.click();
-    });
+    inp.addEventListener('input', ()=>{ inp.value = inp.value.replace(/\D/g,''); });
+    inp.addEventListener('keydown', e=>{ if (e.key==='Enter') btn.click(); });
   });
-  // Auto-jump: after 6 digits go to PIN
   codeInput.addEventListener('input', ()=>{
     if (codeInput.value.length === 6) pinInput.focus();
   });
@@ -3191,49 +3673,70 @@ function attachFindQuizEvents() {
     if (code.length < 6) { codeInput.classList.add('error'); codeInput.focus(); return; }
     if (pin.length  < 4) { pinInput.classList.add('error');  pinInput.focus();  return; }
 
-    // Show loading state
     btn.disabled = true;
     const origHtml = btn.innerHTML;
     btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Поиск…':'Qidirilmoqda…'}`;
 
-    // 1. Try server first
+    // 1. Сервер
     const r = await API.findByCodePin(code, pin);
     btn.disabled = false;
     btn.innerHTML = origHtml;
 
+    // Тест заблокирован владельцем
+    if (!r.ok && r.data?.error === 'locked') {
+      if (errText) errText.textContent = LANG==='ru'
+        ? '🔒 Тест временно закрыт автором.'
+        : '🔒 Test muallifi tomonidan vaqtincha yopilgan.';
+      errMsg.classList.add('visible');
+      return;
+    }
+
     if (r.ok && r.data.quiz) {
       const serverQuiz = r.data.quiz;
-      // Add or update in local state
-      const existingIdx = state.quizzes.findIndex(q => q.id === serverQuiz.id);
-      if (existingIdx >= 0) {
-        state.quizzes[existingIdx] = serverQuiz;
+      const isMyQuiz = state.user && serverQuiz.ownerId === state.user.id;
+
+      if (isMyQuiz) {
+        // Свой тест — обновляем в quizzes
+        const idx = state.quizzes.findIndex(q => q.id === serverQuiz.id);
+        if (idx >= 0) state.quizzes[idx] = serverQuiz;
+        else state.quizzes.unshift(serverQuiz);
+        saveStorage(STORAGE.QUIZZES, state.quizzes);
       } else {
-        state.quizzes.unshift(serverQuiz);
+        // Чужой тест — кладём в foundQuizzes
+        const idx = state.foundQuizzes.findIndex(q => q.id === serverQuiz.id);
+        if (idx >= 0) state.foundQuizzes[idx] = serverQuiz;
+        else state.foundQuizzes.unshift(serverQuiz);
+        saveStorage(STORAGE.FOUND_QUIZZES, state.foundQuizzes);
       }
-      saveStorage(STORAGE.QUIZZES, state.quizzes);
-      // Auth check
+
+      const doStart = (quizId) => {
+        // Записываем факт доступа на сервер
+        API.recordAccess(quizId, state.user?.name || 'Гость').catch(()=>{});
+        startQuizFromAll(quizId);
+      };
+
       if (!state.user) {
-        showAuthScreen(() => startQuiz(serverQuiz.id));
+        showAuthScreen(() => doStart(serverQuiz.id));
       } else {
-        startQuiz(serverQuiz.id);
+        doStart(serverQuiz.id);
       }
       return;
     }
 
-    // 2. Fallback: check local storage
+    // 2. Локальный поиск (свои тесты)
     const localQuiz = findQuizByCodePin(code, pin);
     if (localQuiz) {
-      // Push this quiz to server so others can find it next time
       pushQuizToServer(localQuiz).catch(()=>{});
       if (!state.user) {
-        showAuthScreen(() => startQuiz(localQuiz.id));
+        showAuthScreen(() => { API.recordAccess(localQuiz.id, state.user?.name||'Гость').catch(()=>{}); startQuizFromAll(localQuiz.id); });
       } else {
-        startQuiz(localQuiz.id);
+        API.recordAccess(localQuiz.id, state.user?.name||'Гость').catch(()=>{});
+        startQuizFromAll(localQuiz.id);
       }
       return;
     }
 
-    // 3. Not found
+    // 3. Не найдено
     codeInput.classList.add('error');
     pinInput.classList.add('error');
     if (errText) errText.textContent = LANG==='ru'
@@ -3242,6 +3745,19 @@ function attachFindQuizEvents() {
     errMsg.classList.add('visible');
   });
 }
+
+// Найти тест в обоих хранилищах (мои + найденные)
+function findQuizInAll(id) {
+  return state.quizzes.find(q=>q.id===id) || state.foundQuizzes.find(q=>q.id===id);
+}
+
+// Запустить тест из любого хранилища
+function startQuizFromAll(id) {
+  const quiz = findQuizInAll(id);
+  if (!quiz) return;
+  showStartScreen(quiz, {});
+}
+
 
 // ═══════════════════════════════════════════════════════════════
 // INIT
