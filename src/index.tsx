@@ -350,6 +350,16 @@ app.get('/api/quizzes/find', async (c) => {
   const row = await db.prepare('SELECT * FROM quizzes WHERE code=? AND pin=?').bind(code, pin).first() as any
   if (!row) return c.json({ error: 'not_found' }, 404)
   if (row.is_locked) return c.json({ error: 'locked', message: 'Quiz is locked by owner' }, 403)
+
+  // Проверяем, не заблокирован ли текущий пользователь
+  const user = await getUserFromToken(db, getToken(c))
+  if (user) {
+    const restriction = await db.prepare(
+      'SELECT id FROM quiz_user_restrictions WHERE quiz_id=? AND user_id=?'
+    ).bind(row.id, user.id).first()
+    if (restriction) return c.json({ error: 'restricted', message: 'You have been restricted from this quiz by its owner' }, 403)
+  }
+
   return c.json({ ok: true, quiz: quizRow(row) })
 })
 
@@ -432,6 +442,15 @@ app.post('/api/attempts', async (c) => {
     const db = c.env.DB
     const user = await getUserFromToken(db, getToken(c))
     const body = await c.req.json() as any
+
+    // Проверяем, не заблокирован ли пользователь для этого теста
+    if (user && body.quizId) {
+      const restriction = await db.prepare(
+        'SELECT id FROM quiz_user_restrictions WHERE quiz_id=? AND user_id=?'
+      ).bind(body.quizId, user.id).first()
+      if (restriction) return c.json({ error: 'restricted', message: 'You have been restricted from this quiz' }, 403)
+    }
+
     const id = nanoid()
     await db.prepare(`
       INSERT INTO attempts (id,quiz_id,user_id,user_name,percent,correct,wrong,skipped,total,passed,duration,answers_json)
@@ -540,6 +559,106 @@ app.get('/api/admin/overview', async (c) => {
       duration: r.duration, createdAt: r.created_at
     })),
     quizzes: quizStats
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// USER RESTRICTIONS — per-user access control on quizzes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/quizzes/:id/restrictions — список заблокированных пользователей (только владелец)
+app.get('/api/quizzes/:id/restrictions', async (c) => {
+  const db = c.env.DB
+  const user = await getUserFromToken(db, getToken(c))
+  if (!user) return c.json({ error: 'unauthorized' }, 401)
+  const id = c.req.param('id')
+  const quiz = await db.prepare('SELECT owner_id FROM quizzes WHERE id=?').bind(id).first() as any
+  if (!quiz) return c.json({ error: 'not_found' }, 404)
+  if (quiz.owner_id !== user.id) return c.json({ error: 'forbidden' }, 403)
+  const rows = await db.prepare(
+    'SELECT * FROM quiz_user_restrictions WHERE quiz_id=? ORDER BY created_at DESC'
+  ).bind(id).all()
+  return c.json({
+    ok: true,
+    restrictions: (rows.results || []).map((r: any) => ({
+      id: r.id,
+      userId: r.user_id,
+      userName: r.user_name,
+      userEmail: r.user_email,
+      reason: r.reason,
+      createdAt: r.created_at,
+    }))
+  })
+})
+
+// POST /api/quizzes/:id/restrictions — заблокировать пользователя для теста
+app.post('/api/quizzes/:id/restrictions', async (c) => {
+  try {
+    const db = c.env.DB
+    const owner = await getUserFromToken(db, getToken(c))
+    if (!owner) return c.json({ error: 'unauthorized' }, 401)
+    const quizId = c.req.param('id')
+    const quiz = await db.prepare('SELECT owner_id FROM quizzes WHERE id=?').bind(quizId).first() as any
+    if (!quiz) return c.json({ error: 'not_found' }, 404)
+    if (quiz.owner_id !== owner.id) return c.json({ error: 'forbidden' }, 403)
+
+    const body = await c.req.json() as any
+    const { userId, reason = '' } = body
+    if (!userId) return c.json({ error: 'userId required' }, 400)
+    if (userId === owner.id) return c.json({ error: 'cannot restrict yourself' }, 400)
+
+    // Получаем данные пользователя
+    const targetUser = await db.prepare('SELECT id, name, email FROM users WHERE id=?').bind(userId).first() as any
+    if (!targetUser) return c.json({ error: 'user_not_found' }, 404)
+
+    const id = nanoid()
+    await db.prepare(`
+      INSERT INTO quiz_user_restrictions (id, quiz_id, user_id, user_name, user_email, restricted_by, reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(quiz_id, user_id) DO UPDATE SET reason=excluded.reason, created_at=unixepoch()
+    `).bind(id, quizId, userId, targetUser.name, targetUser.email || null, owner.id, reason).run()
+
+    return c.json({ ok: true, restriction: { id, userId, userName: targetUser.name, userEmail: targetUser.email, reason } })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// DELETE /api/quizzes/:quizId/restrictions/:userId — снять блокировку пользователя
+app.delete('/api/quizzes/:quizId/restrictions/:userId', async (c) => {
+  const db = c.env.DB
+  const owner = await getUserFromToken(db, getToken(c))
+  if (!owner) return c.json({ error: 'unauthorized' }, 401)
+  const quizId = c.req.param('quizId')
+  const userId = c.req.param('userId')
+  const quiz = await db.prepare('SELECT owner_id FROM quizzes WHERE id=?').bind(quizId).first() as any
+  if (!quiz) return c.json({ error: 'not_found' }, 404)
+  if (quiz.owner_id !== owner.id) return c.json({ error: 'forbidden' }, 403)
+  await db.prepare('DELETE FROM quiz_user_restrictions WHERE quiz_id=? AND user_id=?').bind(quizId, userId).run()
+  return c.json({ ok: true })
+})
+
+// GET /api/users/search?q=email_or_name — поиск пользователей для блокировки
+app.get('/api/users/search', async (c) => {
+  const db = c.env.DB
+  const owner = await getUserFromToken(db, getToken(c))
+  if (!owner) return c.json({ error: 'unauthorized' }, 401)
+  const q = (c.req.query('q') || '').trim()
+  if (q.length < 2) return c.json({ ok: true, users: [] })
+  // Search both original and lowercase for better unicode support
+  const pattern = `%${q}%`
+  const patternLower = `%${q.toLowerCase()}%`
+  const rows = await db.prepare(
+    `SELECT id, name, email, avatar, provider FROM users
+     WHERE (email LIKE ? OR name LIKE ? OR email LIKE ? OR name LIKE ?)
+       AND id != ? AND provider != 'guest'
+     LIMIT 10`
+  ).bind(pattern, pattern, patternLower, patternLower, owner.id).all()
+  return c.json({
+    ok: true,
+    users: (rows.results || []).map((u: any) => ({
+      id: u.id, name: u.name, email: u.email, avatar: u.avatar, provider: u.provider
+    }))
   })
 })
 

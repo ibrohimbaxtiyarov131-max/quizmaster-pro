@@ -231,6 +231,19 @@ const API = {
   async health() {
     return apiFetch('/health');
   },
+  // User restrictions
+  async getRestrictions(quizId) {
+    return apiFetch('/quizzes/' + quizId + '/restrictions');
+  },
+  async addRestriction(quizId, userId, reason) {
+    return apiFetch('/quizzes/' + quizId + '/restrictions', { method: 'POST', body: JSON.stringify({ userId, reason: reason || '' }) });
+  },
+  async removeRestriction(quizId, userId) {
+    return apiFetch('/quizzes/' + quizId + '/restrictions/' + userId, { method: 'DELETE' });
+  },
+  async searchUsers(q) {
+    return apiFetch('/users/search?q=' + encodeURIComponent(q));
+  },
 };
 
 
@@ -777,6 +790,7 @@ function renderQuizCard(quiz) {
     <button class="btn btn-secondary btn-sm btn-icon" title="${t('editQuiz')}" data-action="edit" data-quiz-id="${quiz.id}"><i class="fas fa-pen"></i></button>
     <button class="btn btn-secondary btn-sm btn-icon" title="${t('shareQuiz')}" data-action="share" data-quiz-id="${quiz.id}"><i class="fas fa-share-alt"></i></button>
     <button class="btn btn-secondary btn-sm btn-icon" title="${LANG==='ru'?'Кто имеет доступ':'Kim kirdi'}" data-action="accesses" data-quiz-id="${quiz.id}"><i class="fas fa-users"></i></button>
+    <button class="btn btn-secondary btn-sm btn-icon" title="${LANG==='ru'?'Управление доступом':'Kirish boshqaruvi'}" data-action="restrict" data-quiz-id="${quiz.id}"><i class="fas fa-user-shield"></i></button>
     <button class="btn btn-sm btn-icon ${locked?'btn-warning':'btn-secondary'}" title="${locked?(LANG==='ru'?'Разблокировать тест':'Testni ochish'):(LANG==='ru'?'Заблокировать тест':'Testni bloklash')}" data-action="lock" data-quiz-id="${quiz.id}">
       <i class="fas ${locked?'fa-lock-open':'fa-lock'}"></i>
     </button>
@@ -797,6 +811,7 @@ function attachQuizCardEvents() {
       else if (action==='share') showShareModal(id);
       else if (action==='lock') toggleQuizLock(id);
       else if (action==='accesses') showAccessesModal(id);
+      else if (action==='restrict') showRestrictionsModal(id);
     });
   });
   document.querySelectorAll('.quiz-card').forEach(el=>{
@@ -1080,6 +1095,266 @@ ${attempts.length ? `
   document.getElementById('btn-export-att')?.addEventListener('click', () => {
     exportAdminCSV(attempts, `attempts_${quiz.code}`);
   });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RESTRICTIONS MODAL — управление доступом конкретных пользователей
+// ═══════════════════════════════════════════════════════════════
+async function showRestrictionsModal(quizId) {
+  const quiz = state.quizzes.find(q => q.id === quizId);
+  if (!quiz) return;
+
+  if (!getAuthToken()) {
+    toast(LANG==='ru'?'Войдите в аккаунт':'Akkauntga kiring', 'warning');
+    return;
+  }
+
+  showModal(`
+<div class="modal-header">
+  <i class="fas fa-user-shield" style="color:var(--primary)"></i>
+  <span class="modal-title">${LANG==='ru'?'Управление доступом':'Kirish boshqaruvi'}: ${escHtml(quiz.title)}</span>
+  <button class="btn btn-icon btn-secondary" onclick="closeModal()"><i class="fas fa-times"></i></button>
+</div>
+<div class="modal-body" id="restrict-modal-body">
+  <div style="text-align:center;padding:30px"><i class="fas fa-spinner fa-spin" style="font-size:24px;color:var(--primary)"></i></div>
+</div>`);
+
+  await renderRestrictionsContent(quizId, quiz.title);
+}
+
+async function renderRestrictionsContent(quizId, quizTitle) {
+  const body = document.getElementById('restrict-modal-body');
+  if (!body) return;
+
+  // Загружаем список ограничений и историю доступов параллельно
+  const [rRestrict, rAccess] = await Promise.all([
+    API.getRestrictions(quizId).catch(() => null),
+    API.getAccesses(quizId).catch(() => null)
+  ]);
+
+  if (!rRestrict || !rRestrict.ok) {
+    body.innerHTML = `<div style="color:var(--danger);text-align:center;padding:20px">${LANG==='ru'?'Ошибка загрузки. Возможно вы не владелец теста.':'Xato. Siz test egasi emasdirsiz.'}</div>`;
+    return;
+  }
+
+  const restrictions = rRestrict.restrictions || [];
+  const accesses = rAccess?.accesses || [];
+
+  // Пользователи из истории доступов, кого ещё не заблокировали
+  const restrictedIds = new Set(restrictions.map(r => r.userId));
+  const accessUsers = accesses.filter(a => a.userId && !restrictedIds.has(a.userId));
+
+  body.innerHTML = `
+<!-- Информация -->
+<div style="padding:12px 16px;background:rgba(99,102,241,0.07);border-radius:10px;border:1px solid rgba(99,102,241,0.15);margin-bottom:18px;font-size:13px;color:var(--text-muted)">
+  <i class="fas fa-info-circle" style="color:var(--primary)"></i>
+  ${LANG==='ru'
+    ? 'Заблокированные пользователи не смогут находить и проходить этот тест по коду+PIN.'
+    : 'Bloklangan foydalanuvchilar bu testni kod+PIN orqali topa va topshira olmaydi.'}
+</div>
+
+<!-- Поиск пользователя для блокировки -->
+<div style="margin-bottom:20px;">
+  <div style="font-size:14px;font-weight:600;margin-bottom:8px;color:var(--text)">
+    <i class="fas fa-user-plus" style="color:var(--danger)"></i>
+    ${LANG==='ru'?'Заблокировать пользователя':'Foydalanuvchini bloklash'}
+  </div>
+
+  <!-- Быстрый выбор из истории доступов -->
+  ${accessUsers.length ? `
+  <div style="margin-bottom:12px;">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">${LANG==='ru'?'Кто уже открывал тест:':'Test ochganlar:'}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;" id="access-users-chips">
+      ${accessUsers.slice(0,10).map(a => `
+      <div class="access-chip" data-user-id="${a.userId}" data-user-name="${escHtml(a.userName||'Гость')}" data-user-email="${escHtml(a.userEmail||'')}"
+        style="display:flex;align-items:center;gap:6px;padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:20px;cursor:pointer;font-size:13px;transition:all .15s"
+        title="${LANG==='ru'?'Нажмите чтобы заблокировать':'Bloklash uchun bosing'}">
+        <span style="font-size:15px">${a.userAvatar && a.userAvatar.length<=4 ? escHtml(a.userAvatar) : '🧑'}</span>
+        <span>${escHtml(a.userName||'Гость')}</span>
+        <i class="fas fa-ban" style="color:var(--danger);font-size:11px"></i>
+      </div>`).join('')}
+    </div>
+  </div>` : ''}
+
+  <!-- Поиск по email/имени -->
+  <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;">
+    <div style="flex:1;min-width:200px;">
+      <input id="restrict-search-input" class="form-control" type="text"
+        placeholder="${LANG==='ru'?'Поиск по email или имени…':'Email yoki ism bo\'yicha qidirish…'}"
+        style="margin-bottom:6px;">
+      <div id="restrict-search-results" style="background:var(--card);border:1px solid var(--border);border-radius:8px;display:none;max-height:180px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.1);"></div>
+    </div>
+  </div>
+
+  <!-- Выбранный пользователь -->
+  <div id="restrict-selected-user" style="display:none;margin-top:10px;padding:10px 14px;background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:10px;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div id="restrict-sel-avatar" style="font-size:20px">🧑</div>
+      <div style="flex:1">
+        <div id="restrict-sel-name" style="font-weight:600;font-size:14px"></div>
+        <div id="restrict-sel-email" style="font-size:12px;color:var(--text-muted)"></div>
+      </div>
+      <button id="restrict-sel-clear" class="btn btn-icon-sm btn-secondary" title="${LANG==='ru'?'Отмена':'Bekor'}"><i class="fas fa-times"></i></button>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+      <input id="restrict-reason-input" class="form-control" type="text"
+        placeholder="${LANG==='ru'?'Причина (необязательно)':'Sabab (ixtiyoriy)'}"
+        style="flex:1;font-size:13px;">
+      <button id="restrict-add-btn" class="btn btn-danger btn-sm">
+        <i class="fas fa-ban"></i> ${LANG==='ru'?'Заблокировать':'Bloklash'}
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Список заблокированных -->
+<div>
+  <div style="font-size:14px;font-weight:600;margin-bottom:10px;color:var(--text);">
+    <i class="fas fa-ban" style="color:var(--danger)"></i>
+    ${LANG==='ru'?'Заблокированные пользователи':'Bloklangan foydalanuvchilar'}
+    <span style="font-size:12px;color:var(--text-muted);font-weight:400;margin-left:6px;">(${restrictions.length})</span>
+  </div>
+  <div id="restrictions-list">
+    ${restrictions.length ? renderRestrictionsList(restrictions, quizId) : `
+    <div style="text-align:center;padding:20px;color:var(--text-muted);">
+      <i class="fas fa-user-check" style="font-size:28px;opacity:0.35;margin-bottom:8px;display:block"></i>
+      ${LANG==='ru'?'Нет ограничений. Тест доступен всем.':'Cheklovlar yo\'q. Test hammaga ochiq.'}
+    </div>`}
+  </div>
+</div>`;
+
+  // — Клик по чипу из истории доступов —
+  document.querySelectorAll('.access-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      selectUserForRestriction(
+        chip.dataset.userId,
+        chip.dataset.userName,
+        chip.dataset.userEmail,
+        '🧑'
+      );
+    });
+  });
+
+  // — Поиск пользователя —
+  let searchTimeout;
+  const searchInput = document.getElementById('restrict-search-input');
+  const searchResults = document.getElementById('restrict-search-results');
+  searchInput?.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    const q = searchInput.value.trim();
+    if (q.length < 2) { searchResults.style.display = 'none'; return; }
+    searchTimeout = setTimeout(async () => {
+      const r = await API.searchUsers(q).catch(() => null);
+      if (!r || !r.ok || !r.users.length) {
+        searchResults.innerHTML = `<div style="padding:12px;font-size:13px;color:var(--text-muted)">${LANG==='ru'?'Пользователи не найдены':'Foydalanuvchilar topilmadi'}</div>`;
+        searchResults.style.display = '';
+        return;
+      }
+      searchResults.innerHTML = r.users.map(u => `
+        <div class="search-user-item" data-uid="${u.id}" data-uname="${escHtml(u.name)}" data-uemail="${escHtml(u.email||'')}" data-uavatar="${escHtml(u.avatar||'🧑')}"
+          style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;transition:background .12s;border-bottom:1px solid var(--border)">
+          <span style="font-size:18px">${u.avatar && u.avatar.length<=4 ? escHtml(u.avatar) : '🧑'}</span>
+          <div>
+            <div style="font-weight:600;font-size:13px">${escHtml(u.name)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${escHtml(u.email||'')}</div>
+          </div>
+        </div>`).join('');
+      searchResults.style.display = '';
+      searchResults.querySelectorAll('.search-user-item').forEach(item => {
+        item.addEventListener('mouseenter', () => item.style.background = 'var(--bg)');
+        item.addEventListener('mouseleave', () => item.style.background = '');
+        item.addEventListener('click', () => {
+          selectUserForRestriction(item.dataset.uid, item.dataset.uname, item.dataset.uemail, item.dataset.uavatar);
+          searchResults.style.display = 'none';
+          searchInput.value = '';
+        });
+      });
+    }, 350);
+  });
+
+  // Закрыть результаты при клике вне
+  document.addEventListener('click', function hideSearch(e) {
+    if (!searchResults?.contains(e.target) && e.target !== searchInput) {
+      if (searchResults) searchResults.style.display = 'none';
+      document.removeEventListener('click', hideSearch);
+    }
+  });
+
+  // — Кнопка "Заблокировать" —
+  document.getElementById('restrict-add-btn')?.addEventListener('click', async () => {
+    const uid = document.getElementById('restrict-add-btn').dataset.userId;
+    const reason = document.getElementById('restrict-reason-input')?.value.trim() || '';
+    if (!uid) return;
+    const btn = document.getElementById('restrict-add-btn');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    const r = await API.addRestriction(quizId, uid, reason).catch(() => null);
+    btn.disabled = false; btn.innerHTML = `<i class="fas fa-ban"></i> ${LANG==='ru'?'Заблокировать':'Bloklash'}`;
+    if (r && r.ok) {
+      toast(LANG==='ru'?'Пользователь заблокирован':'Foydalanuvchi bloklandi', 'success');
+      await renderRestrictionsContent(quizId, quizTitle); // перерисовываем
+    } else {
+      toast(r?.error === 'user_not_found'
+        ? (LANG==='ru'?'Пользователь не найден':'Foydalanuvchi topilmadi')
+        : (LANG==='ru'?'Ошибка блокировки':'Bloklashda xato'), 'error');
+    }
+  });
+
+  // — Кнопка очистить выбор —
+  document.getElementById('restrict-sel-clear')?.addEventListener('click', () => {
+    document.getElementById('restrict-selected-user').style.display = 'none';
+    document.getElementById('restrict-add-btn').dataset.userId = '';
+  });
+}
+
+function renderRestrictionsList(restrictions, quizId) {
+  return `<div style="display:flex;flex-direction:column;gap:8px;">
+  ${restrictions.map(r => `
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(239,68,68,0.05);border:1px solid rgba(239,68,68,0.15);border-radius:10px;" id="restr-row-${r.userId}">
+    <div style="width:36px;height:36px;border-radius:50%;background:rgba(239,68,68,0.15);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+      <i class="fas fa-ban" style="color:#ef4444;font-size:15px"></i>
+    </div>
+    <div style="flex:1;min-width:0;">
+      <div style="font-weight:600;font-size:14px;color:var(--text)">${escHtml(r.userName||'Unknown')}</div>
+      <div style="font-size:12px;color:var(--text-muted)">${r.userEmail ? escHtml(r.userEmail) : (LANG==='ru'?'Email не указан':'Email ko\'rsatilmagan')}</div>
+      ${r.reason ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;font-style:italic">${LANG==='ru'?'Причина:':'Sabab:'} ${escHtml(r.reason)}</div>` : ''}
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;margin-right:6px;">${r.createdAt ? new Date(r.createdAt*1000).toLocaleDateString(LANG==='ru'?'ru-RU':'uz-UZ') : ''}</div>
+    <button class="btn btn-success btn-sm btn-icon" title="${LANG==='ru'?'Снять блокировку':'Blokni olib tashlash'}" onclick="unrestrictUser('${quizId}','${r.userId}',this)">
+      <i class="fas fa-unlock"></i>
+    </button>
+  </div>`).join('')}
+</div>`;
+}
+
+async function unrestrictUser(quizId, userId, btn) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; }
+  const r = await API.removeRestriction(quizId, userId).catch(() => null);
+  if (r && r.ok) {
+    // Удаляем строку из DOM
+    const row = document.getElementById('restr-row-' + userId);
+    if (row) {
+      row.style.opacity = '0';
+      row.style.transform = 'translateX(20px)';
+      row.style.transition = 'all .25s';
+      setTimeout(() => row.remove(), 250);
+    }
+    toast(LANG==='ru'?'Блокировка снята':'Blok olib tashlandi', 'success');
+  } else {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-unlock"></i>'; }
+    toast(LANG==='ru'?'Ошибка':'Xato', 'error');
+  }
+}
+
+function selectUserForRestriction(userId, userName, userEmail, userAvatar) {
+  const selDiv = document.getElementById('restrict-selected-user');
+  const addBtn = document.getElementById('restrict-add-btn');
+  if (!selDiv || !addBtn) return;
+
+  document.getElementById('restrict-sel-avatar').textContent = userAvatar && userAvatar.length <= 4 ? userAvatar : '🧑';
+  document.getElementById('restrict-sel-name').textContent = userName;
+  document.getElementById('restrict-sel-email').textContent = userEmail || (LANG==='ru'?'Email не указан':'Email ko\'rsatilmagan');
+  addBtn.dataset.userId = userId;
+  selDiv.style.display = '';
 }
 
 function showShareModal(id) {
@@ -3687,6 +3962,15 @@ function attachFindQuizEvents() {
       if (errText) errText.textContent = LANG==='ru'
         ? '🔒 Тест временно закрыт автором.'
         : '🔒 Test muallifi tomonidan vaqtincha yopilgan.';
+      errMsg.classList.add('visible');
+      return;
+    }
+
+    // Пользователь заблокирован владельцем теста
+    if (!r.ok && r.data?.error === 'restricted') {
+      if (errText) errText.textContent = LANG==='ru'
+        ? '🚫 Автор теста ограничил ваш доступ к этому тесту.'
+        : '🚫 Test muallifi siz uchun bu testga kirishni chekladi.';
       errMsg.classList.add('visible');
       return;
     }
