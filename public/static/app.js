@@ -144,9 +144,10 @@ const t = (k) => (I18N[LANG][k] || I18N.ru[k] || k);
 
 // ───── STORAGE ────────────────────────────────────────────────
 const STORAGE = {
-  QUIZZES: 'qm_quizzes',
-  HISTORY: 'qm_history',
+  QUIZZES:  'qm_quizzes',
+  HISTORY:  'qm_history',
   SETTINGS: 'qm_settings',
+  USER:     'qm_user',
 };
 function loadStorage(key, def = []) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; }
@@ -156,12 +157,26 @@ function saveStorage(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
 
+// ───── USER PROFILE ───────────────────────────────────────────
+function loadUser() {
+  return loadStorage(STORAGE.USER, null);
+}
+function saveUser(u) {
+  saveStorage(STORAGE.USER, u);
+  state.user = u;
+}
+function getInitials(name) {
+  if (!name) return '?';
+  return name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+}
+
 // ───── STATE ──────────────────────────────────────────────────
 let state = {
   page: 'home',
   quizzes: loadStorage(STORAGE.QUIZZES, getDefaultQuizzes()),
   history: loadStorage(STORAGE.HISTORY, []),
   settings: loadStorage(STORAGE.SETTINGS, { theme: 'light' }),
+  user: loadUser(),            // { name, avatar, provider } or null
   currentQuiz: null,      // quiz being taken
   currentQuestion: 0,
   answers: {},            // { qIndex: answer }
@@ -213,6 +228,81 @@ function genId() { return Date.now().toString(36) + Math.random().toString(36).s
 function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function shuffle(arr) { const a=[...arr]; for(let i=a.length-1;i>0;i--){const j=0|Math.random()*(i+1);[a[i],a[j]]=[a[j],a[i]];} return a; }
 function formatTime(s) { const m=0|s/60; const ss=s%60; return m>0?`${m}:${String(ss).padStart(2,'0')}`:`${ss}${t('sec')}`; }
+
+// ── Quiz Code / PIN ──────────────────────────────────────────
+function genQuizCode() {
+  // 6-digit numeric code
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+function genQuizPin() {
+  // 4-digit PIN
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+function ensureQuizCodes(quiz) {
+  if (!quiz.code) quiz.code = genQuizCode();
+  if (!quiz.pin)  quiz.pin  = genQuizPin();
+  return quiz;
+}
+// Find quiz by code+pin across ALL quizzes
+function findQuizByCodePin(code, pin) {
+  const c = String(code).trim();
+  const p = String(pin).trim();
+  return state.quizzes.find(q => String(q.code) === c && String(q.pin) === p) || null;
+}
+
+// ── URL Share (base64 encoded quiz data) ─────────────────────
+function quizToShareUrl(quiz) {
+  try {
+    // Embed full quiz (without answers stripped) as base64 in URL
+    const payload = JSON.stringify({
+      v: 1,
+      code: quiz.code,
+      pin: quiz.pin,
+      title: quiz.title,
+      description: quiz.description,
+      category: quiz.category,
+      passingScore: quiz.passingScore,
+      timeLimit: quiz.timeLimit,
+      questionTimer: quiz.questionTimer,
+      shuffleQuestions: quiz.shuffleQuestions,
+      shuffleAnswers: quiz.shuffleAnswers,
+      showExplanations: quiz.showExplanations,
+      maxQuestions: quiz.maxQuestions,
+      questions: quiz.questions,
+    });
+    const b64 = btoa(unescape(encodeURIComponent(payload)));
+    return `${location.origin}${location.pathname}?q=${encodeURIComponent(b64)}`;
+  } catch { return `${location.origin}${location.pathname}?quiz=${quiz.id}`; }
+}
+// Short link by code+pin (human-readable, requires recipient to have quiz locally or share via base64)
+function quizToCodeUrl(quiz) {
+  return `${location.origin}${location.pathname}?code=${quiz.code}&pin=${quiz.pin}`;
+}
+function importQuizFromUrl(b64) {
+  try {
+    const json = decodeURIComponent(escape(atob(b64)));
+    const data = JSON.parse(json);
+    if (!data.questions?.length) return null;
+    const quiz = {
+      id: genId(),
+      code: data.code || genQuizCode(),
+      pin: data.pin || genQuizPin(),
+      title: data.title || 'Imported Quiz',
+      description: data.description || '',
+      category: data.category || '',
+      passingScore: data.passingScore || 60,
+      timeLimit: data.timeLimit || 0,
+      questionTimer: data.questionTimer || 0,
+      shuffleQuestions: data.shuffleQuestions || false,
+      shuffleAnswers: data.shuffleAnswers || false,
+      showExplanations: data.showExplanations || 'end',
+      maxQuestions: data.maxQuestions || 0,
+      created: Date.now(),
+      questions: data.questions,
+    };
+    return quiz;
+  } catch { return null; }
+}
 function pluralQ(n) {
   if(LANG==='uz') return `${n} ${t('questions')}`;
   const x=n%100, y=n%10;
@@ -408,7 +498,7 @@ function renderHome() {
     <p class="hero-subtitle">${t('heroSubtitle')}</p>
     <div class="hero-actions">
       <button class="btn btn-primary btn-lg" id="hero-create"><i class="fas fa-plus"></i> ${t('createQuiz')}</button>
-      <button class="btn btn-lg" style="background:rgba(255,255,255,0.15);color:#fff;" id="hero-browse"><i class="fas fa-search"></i> ${t('myQuizzes')}</button>
+      <button class="btn btn-lg" style="background:rgba(255,255,255,0.15);color:#fff;" id="hero-browse"><i class="fas fa-list"></i> ${t('myQuizzes')}</button>
     </div>
     <div class="hero-stats">
       <div><div class="hero-stat-val">${state.quizzes.length}</div><div class="hero-stat-lbl">${t('quizzes')}</div></div>
@@ -418,6 +508,8 @@ function renderHome() {
     </div>
   </div>
 </div>
+
+${renderFindQuizWidget()}
 
 <div class="section-header">
   <div><div class="section-title">${t('featuresTitle')}</div></div>
@@ -444,6 +536,7 @@ ${recentQuizzes.length ? `
   document.getElementById('hero-browse')?.addEventListener('click', ()=>navigate('my-quizzes'));
   document.getElementById('btn-create-home')?.addEventListener('click', ()=>navigate('create-quiz'));
   document.getElementById('btn-all-quizzes')?.addEventListener('click', ()=>navigate('my-quizzes'));
+  attachFindQuizEvents();
   document.querySelectorAll('[data-feature-action]').forEach(el=>{
     el.addEventListener('click', ()=>{
       const action = el.dataset.featureAction;
@@ -476,6 +569,7 @@ function renderQuizCard(quiz) {
       <div class="quiz-meta-item"><i class="fas fa-percent"></i> ${quiz.passingScore}%</div>
       ${attempts.length?`<div class="quiz-meta-item"><i class="fas fa-rotate"></i> ${attempts.length}x</div>`:''}
     </div>
+    ${quiz.code?`<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;"><i class="fas fa-hashtag"></i> <b style="color:var(--primary)">${quiz.code}</b> &nbsp;PIN: <b style="color:var(--warning,#f59e0b)">${quiz.pin||'????'}</b></div>`:''}
     ${avgPct!==null?`<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">${t('avgScore')}: <b style="color:var(--primary)">${avgPct}%</b></div>`:''}
     <div style="display:flex;gap:4px;flex-wrap:wrap;">
       ${[...new Set((quiz.questions||[]).map(q=>q.type))].map(tp=>`<span class="tag ${getTypeBadgeClass(tp)}">${getTypeLabel(tp)}</span>`).join('')}
@@ -578,16 +672,45 @@ function deleteQuiz(id) {
 function showShareModal(id) {
   const quiz = state.quizzes.find(q=>q.id===id);
   if (!quiz) return;
-  const url = `${location.origin}${location.pathname}?quiz=${id}`;
+  ensureQuizCodes(quiz);
+  saveStorage(STORAGE.QUIZZES, state.quizzes);
+  const shareUrl = quizToShareUrl(quiz);
+  const codeUrl = quizToCodeUrl(quiz);
   showModal(`
 <div class="modal-header"><i class="fas fa-share-alt" style="color:var(--primary)"></i><span class="modal-title">${t('shareQuiz')}: ${escHtml(quiz.title)}</span><button class="btn btn-icon btn-secondary" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
 <div class="modal-body">
-  <p style="font-size:14px;color:var(--text-muted);margin-bottom:14px;">${LANG==='ru'?'Поделитесь этой ссылкой':'Ushbu havolani ulashing'}</p>
+
+  <!-- Code + PIN block -->
+  <div style="display:flex;gap:12px;margin-bottom:18px;flex-wrap:wrap;">
+    <div style="flex:1;min-width:120px;background:var(--primary-light);border:2px solid var(--primary);border-radius:12px;padding:14px;text-align:center;">
+      <div style="font-size:11px;font-weight:600;color:var(--primary);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px;"><i class="fas fa-hashtag"></i> ${LANG==='ru'?'Код теста':'Test kodi'}</div>
+      <div style="font-size:28px;font-weight:800;color:var(--primary);letter-spacing:.18em;">${quiz.code}</div>
+    </div>
+    <div style="flex:1;min-width:120px;background:var(--warning-light,#fff9e6);border:2px solid var(--warning,#f59e0b);border-radius:12px;padding:14px;text-align:center;">
+      <div style="font-size:11px;font-weight:600;color:var(--warning,#f59e0b);letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px;"><i class="fas fa-lock"></i> PIN</div>
+      <div style="font-size:28px;font-weight:800;color:var(--warning,#f59e0b);letter-spacing:.18em;">${quiz.pin}</div>
+    </div>
+  </div>
+  <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;text-align:center;">
+    <i class="fas fa-circle-info"></i>
+    ${LANG==='ru'?'Поделитесь кодом и PIN — получатель введёт их на главной странице':'Kod va PIN-ni ulashing — qabul qiluvchi bosh sahifada kiritadi'}
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:16px;">
+    <button class="btn btn-secondary btn-sm" id="copy-code-pin-btn" style="flex:1"><i class="fas fa-copy"></i> ${LANG==='ru'?'Копировать код и PIN':'Kod va PIN nusxa'}</button>
+    <button class="btn btn-secondary btn-sm" id="copy-code-url-btn" style="flex:1"><i class="fas fa-link"></i> ${LANG==='ru'?'Ссылка по коду':'Kod havolasi'}</button>
+  </div>
+
+  <hr class="divider">
+  <p style="font-size:13px;font-weight:600;margin-bottom:8px;">${LANG==='ru'?'Прямая ссылка (открывает тест сразу)':'To\'g\'ridan-to\'g\'ri havola (testni darhol ochadi)'}</p>
+  <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
+    <i class="fas fa-info-circle"></i>
+    ${LANG==='ru'?'Ссылка содержит весь тест — получатель может пройти его без кода':'Havola testning to\'liq ma\'lumotlarini o\'z ichiga oladi'}
+  </div>
   <div class="share-link-box">
-    <input class="share-link-input" id="share-url" value="${url}" readonly>
+    <input class="share-link-input" id="share-url" value="${shareUrl}" readonly>
     <button class="btn btn-primary btn-sm" id="copy-link-btn"><i class="fas fa-copy"></i></button>
   </div>
-  <div style="margin-top:12px;font-size:13px;color:var(--text-muted)">${LANG==='ru'?'Данные теста хранятся локально. Получатель должен импортировать тест.':'Test ma\'lumotlari mahalliy saqlanadi.'}</div>
+
   <hr class="divider">
   <p style="font-size:14px;font-weight:600;margin-bottom:10px">${LANG==='ru'?'Экспорт теста':'Testni eksport qilish'}</p>
   <div style="display:flex;gap:10px">
@@ -595,7 +718,14 @@ function showShareModal(id) {
   </div>
 </div>`);
   document.getElementById('copy-link-btn')?.addEventListener('click',()=>{
-    navigator.clipboard.writeText(url).then(()=>toast(t('shareLinkCopied'),'success'));
+    navigator.clipboard.writeText(shareUrl).then(()=>toast(t('shareLinkCopied'),'success'));
+  });
+  document.getElementById('copy-code-pin-btn')?.addEventListener('click',()=>{
+    const msg = `${LANG==='ru'?'Тест':'Test'}: ${quiz.title}\n${LANG==='ru'?'Код':'Kod'}: ${quiz.code}\nPIN: ${quiz.pin}\n${LANG==='ru'?'Ссылка':'Havola'}: ${shareUrl}`;
+    navigator.clipboard.writeText(msg).then(()=>toast(t('shareLinkCopied'),'success'));
+  });
+  document.getElementById('copy-code-url-btn')?.addEventListener('click',()=>{
+    navigator.clipboard.writeText(codeUrl).then(()=>toast(t('shareLinkCopied'),'success'));
   });
   document.getElementById('export-quiz-json')?.addEventListener('click',()=>{
     const data = { config:{ title:quiz.title, description:quiz.description, category:quiz.category, passingScore:quiz.passingScore, timeLimit:quiz.timeLimit, questionTimer:quiz.questionTimer, shuffleQuestions:quiz.shuffleQuestions, shuffleAnswers:quiz.shuffleAnswers, showExplanations:quiz.showExplanations, maxQuestions:quiz.maxQuestions }, questions: quiz.questions };
@@ -648,6 +778,8 @@ function renderEditor(editId) {
 function newQuizTemplate() {
   return {
     id: genId(),
+    code: genQuizCode(),
+    pin:  genQuizPin(),
     title: '',
     description: '',
     category: '',
@@ -754,6 +886,26 @@ function renderEditorRoot() {
         <option value="none" ${quiz.showExplanations==='none'?'selected':''}>${t('noExplanation')}</option>
       </select>
     </div>
+    ${quiz.code ? `
+    <hr class="divider">
+    <div style="background:var(--bg);border-radius:var(--radius-sm);padding:16px;margin-top:8px;">
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">
+        <i class="fas fa-share-alt"></i> ${LANG==='ru'?'Идентификаторы для доступа':'Kirish identifikatorlari'}
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:100px;text-align:center;">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">${LANG==='ru'?'Код теста':'Test kodi'}</div>
+          <div style="font-size:24px;font-weight:800;color:var(--primary);letter-spacing:.12em;font-family:monospace;">${quiz.code}</div>
+        </div>
+        <div style="flex:1;min-width:100px;text-align:center;">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">PIN</div>
+          <div style="font-size:24px;font-weight:800;color:var(--warning,#f59e0b);letter-spacing:.12em;font-family:monospace;">${quiz.pin}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:10px;text-align:center;">
+        <i class="fas fa-info-circle"></i> ${LANG==='ru'?'Эти данные используются для поиска теста на главной странице':'Bu ma\'lumotlar bosh sahifada test topish uchun ishlatiladi'}
+      </div>
+    </div>` : ''}
   </div>
 </div>`;
 
@@ -1482,6 +1634,7 @@ function renderResults() {
     <div class="results-actions">
       <button class="btn btn-primary btn-lg" id="btn-retry"><i class="fas fa-rotate"></i> ${t('restart')}</button>
       <button class="btn btn-secondary" id="btn-review"><i class="fas fa-list-check"></i> ${t('viewAnswers')}</button>
+      <button class="btn btn-secondary" id="btn-share-result"><i class="fas fa-share-alt"></i> ${t('shareQuiz')}</button>
       <button class="btn btn-secondary" id="btn-export-pdf"><i class="fas fa-file-pdf"></i> PDF</button>
       <button class="btn btn-secondary" id="btn-export-csv"><i class="fas fa-file-csv"></i> CSV</button>
       <button class="btn btn-secondary" id="btn-back-home"><i class="fas fa-house"></i> ${t('home')}</button>
@@ -1533,6 +1686,9 @@ function attachResultsEvents() {
     }
   });
   document.getElementById('btn-back-home')?.addEventListener('click',()=>navigate('home'));
+  document.getElementById('btn-share-result')?.addEventListener('click',()=>{
+    if (state.lastResult?.quiz?.id) showShareModal(state.lastResult.quiz.id);
+  });
   document.getElementById('btn-review')?.addEventListener('click',()=>{
     const sec = document.getElementById('review-section');
     if (sec) sec.style.display = sec.style.display==='none'?'block':'none';
@@ -2278,16 +2434,288 @@ window.onBackdropClick = function(e) {
 };
 
 // ═══════════════════════════════════════════════════════════════
+// AUTH SCREEN
+// ═══════════════════════════════════════════════════════════════
+const AVATARS = ['🧑','👩','👨','🧒','👧','👦','🧑‍💻','👩‍💻','👨‍🎓','👩‍🎓','🦸','🦹'];
+let selectedAvatar = AVATARS[0];
+let authProvider = 'email';
+
+function showAuthScreen(afterAuth) {
+  const overlay = document.createElement('div');
+  overlay.className = 'auth-overlay';
+  overlay.id = 'auth-overlay';
+  overlay.innerHTML = `
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon"><i class="fas fa-brain"></i></div>
+        <div class="auth-logo-text">${t('appName')}</div>
+      </div>
+      <div class="auth-title">${LANG==='ru'?'Добро пожаловать!':'Xush kelibsiz!'}</div>
+      <div class="auth-subtitle">${LANG==='ru'?'Войдите, чтобы сохранять прогресс и результаты':'Davomiylikni saqlash uchun kiring'}</div>
+
+      <button class="social-btn social-google" data-provider="google">
+        <span class="social-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
+        <span class="social-label">${LANG==='ru'?'Продолжить с Google':'Google orqali kirish'}</span>
+        <i class="fas fa-arrow-right social-arrow"></i>
+      </button>
+      <button class="social-btn social-facebook" data-provider="facebook">
+        <span class="social-icon"><i class="fab fa-facebook-f"></i></span>
+        <span class="social-label">${LANG==='ru'?'Продолжить с Facebook':'Facebook orqali kirish'}</span>
+        <i class="fas fa-arrow-right social-arrow"></i>
+      </button>
+      <button class="social-btn social-apple" data-provider="apple">
+        <span class="social-icon"><i class="fab fa-apple"></i></span>
+        <span class="social-label">${LANG==='ru'?'Продолжить с Apple':'Apple orqali kirish'}</span>
+        <i class="fas fa-arrow-right social-arrow"></i>
+      </button>
+      <button class="social-btn social-whatsapp" data-provider="whatsapp">
+        <span class="social-icon"><i class="fab fa-whatsapp"></i></span>
+        <span class="social-label">${LANG==='ru'?'Продолжить с WhatsApp':'WhatsApp orqali kirish'}</span>
+        <i class="fas fa-arrow-right social-arrow"></i>
+      </button>
+
+      <div class="auth-divider">${LANG==='ru'?'или введите имя':'yoki ismingizni kiriting'}</div>
+
+      <div id="auth-name-section">
+        <div class="auth-avatar-row" id="avatar-row">
+          ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
+        </div>
+        <input class="auth-name-input" id="auth-name-input" type="text" maxlength="40"
+          placeholder="${LANG==='ru'?'Ваше имя или никнейм…':'Ismingiz yoki taxallusIngiz…'}">
+        <div class="auth-name-hint">${LANG==='ru'?'Имя будет отображаться в результатах и сертификатах':'Ism natijalar va sertifikatlarda ko\'rsatiladi'}</div>
+        <button class="auth-submit-btn" id="auth-submit-btn">
+          <i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Войти':'Kirish'}
+        </button>
+      </div>
+
+      <div class="auth-skip">
+        <a id="auth-skip-link">${LANG==='ru'?'Продолжить без входа (гость)':'Kirmasdan davom etish (mehmon)'}</a>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  // Avatar selection
+  overlay.querySelectorAll('.avatar-opt').forEach(el=>{
+    el.addEventListener('click',()=>{
+      overlay.querySelectorAll('.avatar-opt').forEach(a=>a.classList.remove('selected'));
+      el.classList.add('selected');
+      selectedAvatar = el.dataset.av;
+    });
+  });
+
+  // Social buttons → prefill name field
+  overlay.querySelectorAll('.social-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      authProvider = btn.dataset.provider;
+      const prov = { google:'Google', facebook:'Facebook', apple:'Apple', whatsapp:'WhatsApp' };
+      const nameInput = document.getElementById('auth-name-input');
+      if (nameInput && !nameInput.value) nameInput.value = prov[authProvider] || '';
+      nameInput?.focus();
+      // Visual feedback
+      overlay.querySelectorAll('.social-btn').forEach(b=>b.style.opacity='0.6');
+      btn.style.opacity='1';
+      btn.style.borderColor='var(--primary)';
+    });
+  });
+
+  // Submit
+  document.getElementById('auth-submit-btn')?.addEventListener('click', ()=>{
+    const name = document.getElementById('auth-name-input')?.value.trim();
+    if (!name) {
+      document.getElementById('auth-name-input')?.classList.add('error');
+      setTimeout(()=>document.getElementById('auth-name-input')?.classList.remove('error'), 1500);
+      return;
+    }
+    const user = { name, avatar: selectedAvatar, provider: authProvider };
+    saveUser(user);
+    overlay.remove();
+    if (afterAuth) afterAuth();
+    else renderApp();
+  });
+
+  // Enter key
+  document.getElementById('auth-name-input')?.addEventListener('keydown', e=>{
+    if (e.key==='Enter') document.getElementById('auth-submit-btn')?.click();
+  });
+
+  // Skip
+  document.getElementById('auth-skip-link')?.addEventListener('click', ()=>{
+    const user = { name: LANG==='ru'?'Гость':'Mehmon', avatar: '👤', provider: 'guest' };
+    saveUser(user);
+    overlay.remove();
+    if (afterAuth) afterAuth();
+    else renderApp();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FIND QUIZ BY CODE/PIN
+// ═══════════════════════════════════════════════════════════════
+function renderFindQuizWidget() {
+  return `
+<div class="find-quiz-widget" id="find-quiz-widget">
+  <div class="find-quiz-title">
+    <i class="fas fa-magnifying-glass" style="color:var(--primary)"></i>
+    ${LANG==='ru'?'Найти тест по коду':'Kod orqali test topish'}
+  </div>
+  <div class="find-quiz-subtitle">
+    ${LANG==='ru'
+      ? 'Введите 6-значный код теста и PIN-код для доступа'
+      : '6 raqamli test kodini va PIN-kodni kiriting'}
+  </div>
+  <div class="code-inputs">
+    <div class="code-input-group">
+      <div class="code-input-label">${LANG==='ru'?'Код теста (6 цифр)':'Test kodi (6 raqam)'}</div>
+      <input class="code-input-field" id="find-code-input" type="text" inputmode="numeric"
+        maxlength="6" placeholder="000000" autocomplete="off">
+    </div>
+    <div class="code-input-group">
+      <div class="code-input-label">PIN (4 ${LANG==='ru'?'цифры':'raqam'})</div>
+      <input class="code-input-field" id="find-pin-input" type="text" inputmode="numeric"
+        maxlength="4" placeholder="0000" autocomplete="off">
+    </div>
+  </div>
+  <div class="find-error-msg" id="find-error-msg">
+    <i class="fas fa-circle-xmark"></i>
+    <span id="find-error-text">${LANG==='ru'?'Тест не найден. Проверьте код и PIN.':'Test topilmadi. Kod va PIN-ni tekshiring.'}</span>
+  </div>
+  <button class="btn btn-primary" style="width:100%" id="find-quiz-btn">
+    <i class="fas fa-search"></i>
+    ${LANG==='ru'?'Найти и начать тест':'Testni topish va boshlash'}
+  </button>
+</div>`;
+}
+
+function attachFindQuizEvents() {
+  const codeInput = document.getElementById('find-code-input');
+  const pinInput  = document.getElementById('find-pin-input');
+  const btn       = document.getElementById('find-quiz-btn');
+  const errMsg    = document.getElementById('find-error-msg');
+
+  // Auto-format: digits only
+  [codeInput, pinInput].forEach(inp=>{
+    if (!inp) return;
+    inp.addEventListener('input', ()=>{
+      inp.value = inp.value.replace(/\D/g,'');
+    });
+    inp.addEventListener('keydown', e=>{
+      if (e.key==='Enter') btn?.click();
+    });
+  });
+  // Auto-jump: after 6 digits go to PIN
+  codeInput?.addEventListener('input', ()=>{
+    if (codeInput.value.length === 6) pinInput?.focus();
+  });
+
+  btn?.addEventListener('click', ()=>{
+    const code = codeInput?.value.trim() || '';
+    const pin  = pinInput?.value.trim()  || '';
+    errMsg.classList.remove('visible');
+    codeInput.classList.remove('error');
+    pinInput.classList.remove('error');
+
+    if (code.length < 6) { codeInput.classList.add('error'); codeInput.focus(); return; }
+    if (pin.length  < 4) { pinInput.classList.add('error');  pinInput.focus();  return; }
+
+    const quiz = findQuizByCodePin(code, pin);
+    if (!quiz) {
+      codeInput.classList.add('error');
+      pinInput.classList.add('error');
+      errMsg.classList.add('visible');
+      return;
+    }
+    startQuiz(quiz.id);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
 function init() {
-  // Check for shared quiz URL
+  // 1. Normalise existing quizzes — add codes if missing
+  let changed = false;
+  state.quizzes.forEach(q => {
+    if (!q.code || !q.pin) { ensureQuizCodes(q); changed = true; }
+  });
+  if (changed) saveStorage(STORAGE.QUIZZES, state.quizzes);
+
+  // 2. Check for ?q= (base64 embedded quiz in URL)
   const params = new URLSearchParams(location.search);
-  const sharedId = params.get('quiz');
-  if (sharedId) {
-    const found = state.quizzes.find(q=>q.id===sharedId);
-    if (found) { startQuiz(found.id); return; }
+  const b64Param = params.get('q');
+  if (b64Param) {
+    const imported = importQuizFromUrl(b64Param);
+    if (imported) {
+      // Check if we already have this quiz (by code)
+      const existing = state.quizzes.find(q=>q.code===imported.code);
+      const quizToUse = existing || imported;
+      if (!existing) {
+        state.quizzes.unshift(imported);
+        saveStorage(STORAGE.QUIZZES, state.quizzes);
+      }
+      // Clear URL param without reload
+      history.replaceState({}, '', location.pathname);
+      // Show auth if needed, then launch quiz
+      if (!state.user) {
+        showAuthScreen(()=> startQuiz(quizToUse.id));
+      } else {
+        startQuiz(quizToUse.id);
+      }
+      return;
+    }
   }
+
+  // 3. Legacy ?quiz=id param
+  const legacyId = params.get('quiz');
+  if (legacyId) {
+    const found = state.quizzes.find(q=>q.id===legacyId);
+    if (found) {
+      history.replaceState({}, '', location.pathname);
+      if (!state.user) { showAuthScreen(()=>startQuiz(found.id)); }
+      else startQuiz(found.id);
+      return;
+    }
+  }
+
+  // 4. ?code=XXX&pin=YYYY direct link
+  const urlCode = params.get('code');
+  const urlPin  = params.get('pin');
+  if (urlCode && urlPin) {
+    history.replaceState({}, '', location.pathname);
+    const foundByCode = findQuizByCodePin(urlCode, urlPin);
+    if (foundByCode) {
+      if (!state.user) { showAuthScreen(()=>startQuiz(foundByCode.id)); }
+      else startQuiz(foundByCode.id);
+      return;
+    }
+    // Not in local storage — show home with pre-filled search
+    if (!state.user) {
+      showAuthScreen(()=>{
+        renderApp();
+        setTimeout(()=>{
+          const ci = document.getElementById('find-code-input');
+          const pi = document.getElementById('find-pin-input');
+          if (ci) { ci.value = urlCode; }
+          if (pi) { pi.value = urlPin; document.getElementById('find-quiz-btn')?.click(); }
+        }, 300);
+      });
+    } else {
+      renderApp();
+      setTimeout(()=>{
+        const ci = document.getElementById('find-code-input');
+        const pi = document.getElementById('find-pin-input');
+        if (ci) { ci.value = urlCode; }
+        if (pi) { pi.value = urlPin; document.getElementById('find-quiz-btn')?.click(); }
+      }, 300);
+    }
+    return;
+  }
+
+  // 5. Show auth if first time
+  if (!state.user) {
+    showAuthScreen(()=>renderApp());
+    return;
+  }
+
   renderApp();
 }
 
