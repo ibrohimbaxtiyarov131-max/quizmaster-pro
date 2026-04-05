@@ -8,7 +8,15 @@ import appJs from '../public/static/app.js?raw'
 import appCss from '../public/static/app.css?raw'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type Bindings = { DB: D1Database }
+type Bindings = {
+  DB: D1Database
+  // Payme Business credentials (set via wrangler secret / .dev.vars)
+  PAYME_MERCHANT_ID: string   // Merchant ID из кабинета Payme Business
+  PAYME_SECRET_KEY: string    // Секретный ключ (production)
+  PAYME_TEST_SECRET_KEY: string // Секретный ключ (test/sandbox)
+  PAYME_TEST_MODE: string     // 'true' | 'false'  (по умолчанию 'true' до получения прода)
+  APP_URL: string             // https://your-domain.pages.dev (для return_url)
+}
 const app = new Hono<{ Bindings: Bindings }>()
 
 // ─── CORS & Middleware ────────────────────────────────────────────────────────
@@ -659,6 +667,412 @@ app.get('/api/users/search', async (c) => {
     users: (rows.results || []).map((u: any) => ({
       id: u.id, name: u.name, email: u.email, avatar: u.avatar, provider: u.provider
     }))
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BILLING API  —  Plans, Subscriptions, Payme Payments
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Payme helpers ────────────────────────────────────────────────────────────
+// Payme JSONRPC error codes
+const PAYME_ERR = {
+  PARSE_ERROR:       { code: -32700, message: { ru: 'Ошибка парсинга', en: 'Parse error', uz: 'Parsing xatosi' } },
+  INVALID_REQUEST:   { code: -32600, message: { ru: 'Неверный запрос', en: 'Invalid Request', uz: "Noto'g'ri so'rov" } },
+  METHOD_NOT_FOUND:  { code: -32601, message: { ru: 'Метод не найден', en: 'Method not found', uz: 'Metod topilmadi' } },
+  INVALID_AMOUNT:    { code: -31001, message: { ru: 'Неверная сумма', en: 'Invalid amount', uz: "Noto'g'ri summa" } },
+  TRANSACTION_NOT_FOUND: { code: -31003, message: { ru: 'Транзакция не найдена', en: 'Transaction not found', uz: 'Tranzaksiya topilmadi' } },
+  BAD_REQUEST:       { code: -31050, message: { ru: 'Неверные параметры', en: 'Bad request', uz: "Noto'g'ri parametrlar" } },
+  ALREADY_PAID:      { code: -31099, message: { ru: 'Уже оплачено', en: 'Already paid', uz: "Allaqachon to'langan" } },
+  UNABLE_PERFORM:    { code: -31008, message: { ru: 'Невозможно выполнить', en: 'Unable to perform', uz: 'Bajarib bo\'lmaydi' } },
+}
+
+function paymeError(err: typeof PAYME_ERR[keyof typeof PAYME_ERR], id: any = null) {
+  return { jsonrpc: '2.0', id, error: { code: err.code, message: err.message, data: null } }
+}
+function paymeOk(result: any, id: any = null) {
+  return { jsonrpc: '2.0', id, result }
+}
+
+// Verify Payme Basic Auth header
+function verifyPaymeAuth(c: any): boolean {
+  const authHeader = c.req.header('Authorization') || ''
+  if (!authHeader.startsWith('Basic ')) return false
+  const b64 = authHeader.slice(6)
+  try {
+    const decoded = atob(b64)
+    const [, pass] = decoded.split(':')
+    const isTest = (c.env.PAYME_TEST_MODE || 'true') === 'true'
+    const expected = isTest
+      ? (c.env.PAYME_TEST_SECRET_KEY || '')
+      : (c.env.PAYME_SECRET_KEY || '')
+    // If keys not configured yet — reject all (safe default)
+    if (!expected) return false
+    return pass === expected
+  } catch { return false }
+}
+
+// Build Payme checkout URL
+function buildPaymeUrl(c: any, orderId: string, amount: number): string {
+  const merchantId = c.env.PAYME_MERCHANT_ID || ''
+  const isTest = (c.env.PAYME_TEST_MODE || 'true') === 'true'
+  if (!merchantId) return '' // not configured yet
+  const appUrl = c.env.APP_URL || 'https://localhost:3000'
+  const params = btoa(JSON.stringify({
+    m: merchantId,
+    ac: { order_id: orderId },
+    a: amount,
+    c: `${appUrl}/api/billing/payme/return?order_id=${orderId}`,
+    ct: 6000, // 10 min timeout
+    l: 'ru',
+  }))
+  const base = isTest
+    ? 'https://checkout.test.paycom.uz/'
+    : 'https://checkout.paycom.uz/'
+  return `${base}${params}`
+}
+
+// ─── GET /api/plans — список тарифов ─────────────────────────────────────────
+app.get('/api/plans', async (c) => {
+  try {
+    const db = c.env.DB
+    const rows = await db.prepare(
+      `SELECT id, name_ru, name_uz, price_uzs, price_month, max_quizzes, max_questions, features_json
+       FROM plans WHERE is_active=1 ORDER BY sort_order ASC`
+    ).all()
+    const plans = (rows.results || []).map((p: any) => ({
+      id: p.id,
+      name: { ru: p.name_ru, uz: p.name_uz },
+      price_uzs: p.price_uzs,
+      price_month: p.price_month,
+      max_quizzes: p.max_quizzes,
+      max_questions: p.max_questions,
+      features: JSON.parse(p.features_json || '[]'),
+    }))
+    return c.json({ ok: true, plans })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── GET /api/billing/my — текущая подписка пользователя ──────────────────────
+app.get('/api/billing/my', async (c) => {
+  try {
+    const db = c.env.DB
+    const user = await getUserFromToken(db, getToken(c))
+    if (!user) return c.json({ error: 'unauthorized' }, 401)
+    const now = Math.floor(Date.now() / 1000)
+
+    // Найти активную подписку (или последнюю)
+    const sub = await db.prepare(
+      `SELECT s.*, p.name_ru, p.name_uz, p.price_uzs, p.max_quizzes, p.max_questions, p.features_json
+       FROM subscriptions s JOIN plans p ON s.plan_id = p.id
+       WHERE s.user_id = ? AND (s.status = 'active' OR s.plan_id = 'free')
+       ORDER BY s.created_at DESC LIMIT 1`
+    ).bind(user.id).first() as any
+
+    if (!sub) {
+      // Нет подписки — создаём free автоматически
+      const id = nanoid()
+      await db.prepare(
+        `INSERT INTO subscriptions (id, user_id, plan_id, status) VALUES (?, ?, 'free', 'active')`
+      ).bind(id, user.id).run()
+      return c.json({ ok: true, plan: 'free', status: 'active', expires_at: null, features: [] })
+    }
+
+    // Проверяем не истекла ли подписка
+    const isExpired = sub.expires_at && sub.expires_at < now
+    return c.json({
+      ok: true,
+      plan: sub.plan_id,
+      status: isExpired ? 'expired' : sub.status,
+      expires_at: sub.expires_at,
+      name: { ru: sub.name_ru, uz: sub.name_uz },
+      max_quizzes: sub.max_quizzes,
+      max_questions: sub.max_questions,
+      features: JSON.parse(sub.features_json || '[]'),
+    })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── POST /api/billing/create-order — создать заказ для Payme ─────────────────
+app.post('/api/billing/create-order', async (c) => {
+  try {
+    const db = c.env.DB
+    const user = await getUserFromToken(db, getToken(c))
+    if (!user) return c.json({ error: 'unauthorized' }, 401)
+
+    const { plan_id } = await c.req.json() as any
+    const plan = await db.prepare('SELECT * FROM plans WHERE id=? AND is_active=1').bind(plan_id).first() as any
+    if (!plan) return c.json({ error: 'plan_not_found' }, 404)
+    if (plan.price_month === 0) return c.json({ error: 'free_plan_no_payment' }, 400)
+
+    // Проверяем не сконфигурированы ли ключи Payme
+    const merchantId = c.env.PAYME_MERCHANT_ID || ''
+    if (!merchantId) {
+      return c.json({
+        ok: false,
+        payme_configured: false,
+        message: 'Payme не настроен. Добавьте PAYME_MERCHANT_ID в переменные окружения.',
+      }, 503)
+    }
+
+    const orderId = nanoid(20)
+    const amount = plan.price_month // тийины (UZS * 100)
+    const paymentId = nanoid()
+
+    await db.prepare(
+      `INSERT INTO payments (id, user_id, plan_id, amount, status, order_id)
+       VALUES (?, ?, ?, ?, 'pending', ?)`
+    ).bind(paymentId, user.id, plan_id, amount, orderId).run()
+
+    const checkoutUrl = buildPaymeUrl(c, orderId, amount)
+    return c.json({
+      ok: true,
+      payme_configured: true,
+      order_id: orderId,
+      payment_id: paymentId,
+      amount,
+      checkout_url: checkoutUrl,
+    })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── GET /api/billing/payme/return — callback после оплаты ───────────────────
+app.get('/api/billing/payme/return', async (c) => {
+  const orderId = c.req.query('order_id') || ''
+  // Перенаправляем в SPA с параметром
+  return c.redirect(`/?payment_order=${encodeURIComponent(orderId)}`)
+})
+
+// ─── POST /api/billing/payme — Payme JSONRPC endpoint ────────────────────────
+// Payme вызывает этот URL для: CheckPerformTransaction, CreateTransaction,
+// PerformTransaction, CancelTransaction, CheckTransaction, GetStatement
+app.post('/api/billing/payme', async (c) => {
+  // Проверяем авторизацию от Payme
+  if (!verifyPaymeAuth(c)) {
+    return c.json(paymeError(PAYME_ERR.INVALID_REQUEST))
+  }
+
+  let body: any
+  try { body = await c.req.json() } catch {
+    return c.json(paymeError(PAYME_ERR.PARSE_ERROR))
+  }
+
+  const { method, params, id } = body
+  const db = c.env.DB
+
+  // ── CheckPerformTransaction ─────────────────────────────────────────────────
+  if (method === 'CheckPerformTransaction') {
+    const orderId = params?.account?.order_id
+    if (!orderId) return c.json(paymeError(PAYME_ERR.BAD_REQUEST, id))
+    const payment = await db.prepare('SELECT * FROM payments WHERE order_id=?').bind(orderId).first() as any
+    if (!payment) return c.json(paymeError(PAYME_ERR.TRANSACTION_NOT_FOUND, id))
+    if (payment.amount !== params.amount) return c.json(paymeError(PAYME_ERR.INVALID_AMOUNT, id))
+    if (payment.status === 'paid') return c.json(paymeError(PAYME_ERR.ALREADY_PAID, id))
+    return c.json(paymeOk({ allow: true }, id))
+  }
+
+  // ── CreateTransaction ───────────────────────────────────────────────────────
+  if (method === 'CreateTransaction') {
+    const orderId = params?.account?.order_id
+    const paymeId = params?.id
+    const amount  = params?.amount
+    const paymeTime = params?.time
+
+    if (!orderId || !paymeId) return c.json(paymeError(PAYME_ERR.BAD_REQUEST, id))
+
+    const payment = await db.prepare('SELECT * FROM payments WHERE order_id=?').bind(orderId).first() as any
+    if (!payment) return c.json(paymeError(PAYME_ERR.TRANSACTION_NOT_FOUND, id))
+    if (payment.amount !== amount) return c.json(paymeError(PAYME_ERR.INVALID_AMOUNT, id))
+
+    const now = Math.floor(Date.now() / 1000)
+
+    // Если уже создана с таким payme_id
+    if (payment.payme_id === paymeId) {
+      if (payment.status === 'paid') return c.json(paymeError(PAYME_ERR.ALREADY_PAID, id))
+      return c.json(paymeOk({ create_time: payment.payme_time || paymeTime, transaction: payment.id, state: 1 }, id))
+    }
+
+    // Уже привязан другой payme_id
+    if (payment.payme_id && payment.payme_id !== paymeId) {
+      return c.json(paymeError(PAYME_ERR.UNABLE_PERFORM, id))
+    }
+
+    // Устанавливаем payme_id
+    await db.prepare(
+      'UPDATE payments SET payme_id=?, payme_time=?, updated_at=? WHERE order_id=?'
+    ).bind(paymeId, paymeTime, now, orderId).run()
+
+    return c.json(paymeOk({ create_time: paymeTime, transaction: payment.id, state: 1 }, id))
+  }
+
+  // ── PerformTransaction ──────────────────────────────────────────────────────
+  if (method === 'PerformTransaction') {
+    const paymeId = params?.id
+    if (!paymeId) return c.json(paymeError(PAYME_ERR.BAD_REQUEST, id))
+
+    const payment = await db.prepare('SELECT * FROM payments WHERE payme_id=?').bind(paymeId).first() as any
+    if (!payment) return c.json(paymeError(PAYME_ERR.TRANSACTION_NOT_FOUND, id))
+
+    const now = Math.floor(Date.now() / 1000)
+
+    if (payment.status === 'paid') {
+      return c.json(paymeOk({ perform_time: payment.perform_time, transaction: payment.id, state: 2 }, id))
+    }
+    if (payment.status === 'cancelled') return c.json(paymeError(PAYME_ERR.UNABLE_PERFORM, id))
+
+    // Помечаем платёж как выполненный
+    await db.prepare(
+      'UPDATE payments SET status=\'paid\', perform_time=?, updated_at=? WHERE payme_id=?'
+    ).bind(now, now, paymeId).run()
+
+    // Активируем подписку пользователя (30 дней)
+    const expiresAt = now + 30 * 24 * 60 * 60
+    const existingSub = await db.prepare(
+      'SELECT id FROM subscriptions WHERE user_id=?'
+    ).bind(payment.user_id).first() as any
+
+    if (existingSub) {
+      await db.prepare(
+        `UPDATE subscriptions SET plan_id=?, status='active', expires_at=?, payment_id=?, updated_at=?
+         WHERE user_id=?`
+      ).bind(payment.plan_id, expiresAt, payment.id, now, payment.user_id).run()
+    } else {
+      await db.prepare(
+        `INSERT INTO subscriptions (id, user_id, plan_id, status, expires_at, payment_id)
+         VALUES (?, ?, ?, 'active', ?, ?)`
+      ).bind(nanoid(), payment.user_id, payment.plan_id, expiresAt, payment.id).run()
+    }
+
+    return c.json(paymeOk({ perform_time: now, transaction: payment.id, state: 2 }, id))
+  }
+
+  // ── CancelTransaction ───────────────────────────────────────────────────────
+  if (method === 'CancelTransaction') {
+    const paymeId = params?.id
+    const reason  = params?.reason
+    if (!paymeId) return c.json(paymeError(PAYME_ERR.BAD_REQUEST, id))
+
+    const payment = await db.prepare('SELECT * FROM payments WHERE payme_id=?').bind(paymeId).first() as any
+    if (!payment) return c.json(paymeError(PAYME_ERR.TRANSACTION_NOT_FOUND, id))
+
+    const now = Math.floor(Date.now() / 1000)
+
+    if (payment.status === 'cancelled') {
+      return c.json(paymeOk({ cancel_time: payment.cancel_time, transaction: payment.id, state: -1 }, id))
+    }
+    // Нельзя отменить уже выполненный платёж (state 2) — только если бизнес-логика позволяет
+    // Здесь допускаем полный refund (state -2)
+    const newState = payment.status === 'paid' ? -2 : -1
+
+    await db.prepare(
+      'UPDATE payments SET status=\'cancelled\', reason=?, cancel_time=?, updated_at=? WHERE payme_id=?'
+    ).bind(reason, now, now, paymeId).run()
+
+    // Деактивируем подписку если была активирована этим платежом
+    if (payment.status === 'paid') {
+      await db.prepare(
+        `UPDATE subscriptions SET plan_id='free', status='active', expires_at=NULL, updated_at=?
+         WHERE payment_id=?`
+      ).bind(now, payment.id).run()
+    }
+
+    return c.json(paymeOk({ cancel_time: now, transaction: payment.id, state: newState }, id))
+  }
+
+  // ── CheckTransaction ────────────────────────────────────────────────────────
+  if (method === 'CheckTransaction') {
+    const paymeId = params?.id
+    if (!paymeId) return c.json(paymeError(PAYME_ERR.BAD_REQUEST, id))
+
+    const payment = await db.prepare('SELECT * FROM payments WHERE payme_id=?').bind(paymeId).first() as any
+    if (!payment) return c.json(paymeError(PAYME_ERR.TRANSACTION_NOT_FOUND, id))
+
+    const stateMap: Record<string, number> = { pending: 1, paid: 2, cancelled: -1, failed: -1 }
+    return c.json(paymeOk({
+      create_time:  payment.payme_time,
+      perform_time: payment.perform_time || 0,
+      cancel_time:  payment.cancel_time  || 0,
+      transaction:  payment.id,
+      state:        stateMap[payment.status] ?? 0,
+      reason:       payment.reason || null,
+    }, id))
+  }
+
+  // ── GetStatement ────────────────────────────────────────────────────────────
+  if (method === 'GetStatement') {
+    const from = params?.from
+    const to   = params?.to
+    const rows = await db.prepare(
+      `SELECT * FROM payments WHERE payme_time >= ? AND payme_time <= ? AND payme_id IS NOT NULL`
+    ).bind(from, to).all()
+
+    const transactions = (rows.results || []).map((p: any) => {
+      const stateMap: Record<string, number> = { pending: 1, paid: 2, cancelled: -1, failed: -1 }
+      return {
+        id: p.payme_id,
+        time: p.payme_time,
+        amount: p.amount,
+        account: { order_id: p.order_id },
+        create_time: p.payme_time,
+        perform_time: p.perform_time || 0,
+        cancel_time: p.cancel_time || 0,
+        transaction: p.id,
+        state: stateMap[p.status] ?? 0,
+        reason: p.reason || null,
+      }
+    })
+    return c.json(paymeOk({ transactions }, id))
+  }
+
+  return c.json(paymeError(PAYME_ERR.METHOD_NOT_FOUND, id))
+})
+
+// ─── GET /api/billing/history — история платежей пользователя ─────────────────
+app.get('/api/billing/history', async (c) => {
+  try {
+    const db = c.env.DB
+    const user = await getUserFromToken(db, getToken(c))
+    if (!user) return c.json({ error: 'unauthorized' }, 401)
+    const rows = await db.prepare(
+      `SELECT p.*, pl.name_ru, pl.name_uz FROM payments p
+       JOIN plans pl ON p.plan_id = pl.id
+       WHERE p.user_id = ? ORDER BY p.created_at DESC LIMIT 50`
+    ).bind(user.id).all()
+    return c.json({
+      ok: true,
+      payments: (rows.results || []).map((p: any) => ({
+        id: p.id,
+        plan: { id: p.plan_id, name: { ru: p.name_ru, uz: p.name_uz } },
+        amount: p.amount,
+        amount_uzs: Math.round(p.amount / 100),
+        status: p.status,
+        order_id: p.order_id,
+        created_at: p.created_at,
+        perform_time: p.perform_time,
+      }))
+    })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ─── GET /api/billing/payme/status — конфигурация Payme ──────────────────────
+app.get('/api/billing/payme/status', async (c) => {
+  const isTest = (c.env.PAYME_TEST_MODE || 'true') === 'true'
+  const configured = !!(c.env.PAYME_MERCHANT_ID)
+  return c.json({
+    ok: true,
+    configured,
+    test_mode: isTest,
+    message: configured
+      ? (isTest ? 'Payme активен в тестовом режиме' : 'Payme активен в боевом режиме')
+      : 'Payme не настроен. Добавьте PAYME_MERCHANT_ID, PAYME_SECRET_KEY в переменные окружения.',
   })
 })
 

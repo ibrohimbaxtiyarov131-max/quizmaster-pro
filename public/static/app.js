@@ -244,6 +244,22 @@ const API = {
   async searchUsers(q) {
     return apiFetch('/users/search?q=' + encodeURIComponent(q));
   },
+  // Billing
+  async getPlans() {
+    return apiFetch('/plans');
+  },
+  async getMySubscription() {
+    return apiFetch('/billing/my');
+  },
+  async createOrder(plan_id) {
+    return apiFetch('/billing/create-order', { method: 'POST', body: JSON.stringify({ plan_id }) });
+  },
+  async getBillingHistory() {
+    return apiFetch('/billing/history');
+  },
+  async getPaymeStatus() {
+    return apiFetch('/billing/payme/status');
+  },
 };
 
 
@@ -544,7 +560,7 @@ function renderApp() {
   if (!app) return;
 
   // Pages that use the sidebar layout
-  const withSidebar = ['home','my-quizzes','create-quiz','edit-quiz','history','admin','settings'];
+  const withSidebar = ['home','my-quizzes','create-quiz','edit-quiz','history','admin','settings','plans'];
 
   if (withSidebar.includes(state.page)) {
     app.innerHTML = renderSidebarLayout();
@@ -571,6 +587,7 @@ function renderSidebarLayout() {
     { id:'create-quiz', icon:'fa-plus-circle', label:t('createQuiz'), section:'main' },
     { id:'history', icon:'fa-clock-rotate-left', label:t('history'), section:'main' },
     { id:'admin', icon:'fa-chart-bar', label:t('admin'), section:'admin' },
+    { id:'plans', icon:'fa-crown', label:LANG==='ru'?'Тарифы':'Tariflar', section:'admin', badge: null },
     { id:'settings', icon:'fa-gear', label:t('settings'), section:'admin' },
   ];
   const sections = { main: t('quizzes'), admin: t('analytics') };
@@ -650,6 +667,7 @@ function renderPageContent() {
     'edit-quiz': () => renderEditor(state.navParams?.id),
     'history': renderHistory,
     'admin': renderAdmin,
+    'plans': renderPlans,
     'settings': renderSettings,
   };
   const fn = pages[state.page];
@@ -2861,6 +2879,291 @@ function exportAdminCSV(attempts, filename) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PLANS / BILLING PAGE
+// ═══════════════════════════════════════════════════════════════
+async function renderPlans() {
+  const area = document.getElementById('content-area');
+  const titleEl = document.getElementById('topbar-title');
+  if (!area) return;
+  if (titleEl) titleEl.textContent = LANG === 'ru' ? 'Тарифы' : 'Tariflar';
+
+  // Skeleton while loading
+  area.innerHTML = `
+<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:300px;gap:14px;">
+  <i class="fas fa-spinner fa-spin" style="font-size:32px;color:var(--primary)"></i>
+  <div style="color:var(--text-muted);font-size:15px;">${LANG==='ru'?'Загрузка тарифов…':'Tariflar yuklanmoqda…'}</div>
+</div>`;
+
+  // Fetch plans and current sub in parallel
+  const [plansRes, subRes] = await Promise.all([
+    API.getPlans(),
+    state.user ? API.getMySubscription() : Promise.resolve({ ok: false, data: {} }),
+  ]);
+
+  const plans   = plansRes.ok ? (plansRes.data.plans || []) : [];
+  const currentPlan = subRes.ok ? (subRes.data.plan || 'free') : 'free';
+  const subExpires  = subRes.ok ? subRes.data.expires_at : null;
+
+  // Plan visual config
+  const planMeta = {
+    free:     { icon: 'fa-star-half-stroke', color: '#6b7280', bg: '#f3f4f6', badge: '', popular: false },
+    basic:    { icon: 'fa-bolt',             color: '#f59e0b', bg: '#fffbeb', badge: LANG==='ru'?'Старт':'Start', popular: false },
+    pro:      { icon: 'fa-crown',            color: '#8b5cf6', bg: '#f5f3ff', badge: LANG==='ru'?'Популярный':'Mashhur', popular: true },
+    business: { icon: 'fa-building',         color: '#0ea5e9', bg: '#f0f9ff', badge: LANG==='ru'?'Бизнес':'Biznes', popular: false },
+  };
+
+  function formatUZS(uzs) {
+    if (!uzs) return LANG === 'ru' ? 'Бесплатно' : 'Bepul';
+    return uzs.toLocaleString('ru-RU') + ' ' + (LANG === 'ru' ? 'сум/мес' : 'so\'m/oy');
+  }
+
+  function renderPlanCard(p) {
+    const meta = planMeta[p.id] || planMeta.free;
+    const isCurrent = p.id === currentPlan;
+    const name = LANG === 'ru' ? p.name.ru : p.name.uz;
+    const features = p.features || [];
+    const maxQ = p.max_quizzes === -1 ? (LANG==='ru'?'Безлимит':'Cheksiz') : p.max_quizzes;
+    const maxQstn = p.max_questions === 9999 || p.max_questions === -1 ? (LANG==='ru'?'Безлимит':'Cheksiz') : p.max_questions;
+
+    return `
+<div class="plan-card${isCurrent?' plan-current':''}${meta.popular?' plan-popular':''}" data-plan-id="${p.id}"
+  style="--plan-color:${meta.color};--plan-bg:${meta.bg};">
+  ${meta.popular ? `<div class="plan-popular-ribbon"><i class="fas fa-fire"></i> ${meta.badge}</div>` : ''}
+  <div class="plan-header">
+    <div class="plan-icon-wrap" style="background:${meta.bg};border:2px solid ${meta.color}20;">
+      <i class="fas ${meta.icon}" style="color:${meta.color};font-size:28px;"></i>
+    </div>
+    <div>
+      <div class="plan-name">${escHtml(name)}</div>
+      ${meta.badge && !meta.popular ? `<span class="plan-badge" style="background:${meta.color}20;color:${meta.color};">${meta.badge}</span>` : ''}
+    </div>
+  </div>
+
+  <div class="plan-price">
+    ${p.price_uzs === 0
+      ? `<span class="plan-price-val" style="color:${meta.color};">${LANG==='ru'?'Бесплатно':'Bepul'}</span>`
+      : `<span class="plan-price-val" style="color:${meta.color};">${p.price_uzs.toLocaleString('ru-RU')}</span>
+         <span class="plan-price-cur">${LANG==='ru'?'сум':'so\'m'}</span>
+         <span class="plan-price-period">/${LANG==='ru'?'мес':'oy'}</span>`
+    }
+  </div>
+
+  <div class="plan-limits">
+    <div class="plan-limit-item">
+      <i class="fas fa-layer-group" style="color:${meta.color}"></i>
+      <span>${LANG==='ru'?'Тестов:':'Testlar:'} <b>${maxQ}</b></span>
+    </div>
+    <div class="plan-limit-item">
+      <i class="fas fa-list-ol" style="color:${meta.color}"></i>
+      <span>${LANG==='ru'?'Вопросов:':'Savollar:'} <b>${maxQstn}</b></span>
+    </div>
+  </div>
+
+  <ul class="plan-features">
+    ${features.map(f => `<li><i class="fas fa-check" style="color:${meta.color}"></i> ${escHtml(f)}</li>`).join('')}
+  </ul>
+
+  <div class="plan-action">
+    ${isCurrent
+      ? `<button class="btn plan-btn-current" disabled>
+           <i class="fas fa-check-circle"></i> ${LANG==='ru'?'Текущий план':'Joriy tarif'}
+         </button>`
+      : p.price_uzs === 0
+        ? `<button class="btn plan-btn-free" data-plan-select="${p.id}">
+             <i class="fas fa-arrow-right"></i> ${LANG==='ru'?'Выбрать':'Tanlash'}
+           </button>`
+        : `<button class="btn plan-btn-buy" data-plan-select="${p.id}" style="background:${meta.color};">
+             <i class="fas fa-credit-card"></i>
+             ${LANG==='ru'?'Оплатить через Payme':'Payme orqali to\'lash'}
+           </button>`
+    }
+  </div>
+</div>`;
+  }
+
+  // Build page
+  let subInfoHtml = '';
+  if (state.user && currentPlan !== 'free' && subExpires) {
+    const expDate = new Date(subExpires * 1000).toLocaleDateString('ru-RU');
+    subInfoHtml = `
+<div class="billing-sub-info">
+  <i class="fas fa-calendar-check" style="color:var(--primary)"></i>
+  ${LANG==='ru'?`Подписка активна до <b>${expDate}</b>`:`Obuna ${expDate} gacha faol`}
+</div>`;
+  }
+
+  area.innerHTML = `
+<div class="billing-page">
+  <div class="billing-hero">
+    <div class="billing-hero-icon"><i class="fas fa-crown"></i></div>
+    <h2 class="billing-hero-title">${LANG==='ru'?'Выберите тарифный план':'Tarif rejasini tanlang'}</h2>
+    <p class="billing-hero-sub">${LANG==='ru'?'Начните бесплатно. Обновите в любое время.':'Bepul boshlang. Istalgan vaqt yangilang.'}</p>
+    ${subInfoHtml}
+  </div>
+
+  ${plans.length === 0
+    ? `<div style="text-align:center;padding:40px;color:var(--text-muted)">
+         <i class="fas fa-circle-exclamation" style="font-size:40px;margin-bottom:12px;display:block;"></i>
+         ${LANG==='ru'?'Тарифы временно недоступны':'Tariflar vaqtincha mavjud emas'}
+       </div>`
+    : `<div class="plans-grid">${plans.map(renderPlanCard).join('')}</div>`
+  }
+
+  <!-- Payme info block -->
+  <div class="billing-payme-info">
+    <div class="billing-payme-logo">
+      <svg width="120" height="32" viewBox="0 0 120 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="120" height="32" rx="8" fill="#00ADEF"/>
+        <text x="10" y="22" font-family="Arial,sans-serif" font-weight="700" font-size="16" fill="#fff">payme</text>
+        <circle cx="105" cy="16" r="8" fill="#fff" fill-opacity="0.2"/>
+        <text x="101" y="21" font-family="Arial,sans-serif" font-weight="700" font-size="12" fill="#fff">uz</text>
+      </svg>
+    </div>
+    <p>${LANG==='ru'
+      ? 'Оплата через <b>Payme</b> — безопасная платёжная система Узбекистана. Поддерживаются все банковские карты UzCard и Humo.'
+      : '<b>Payme</b> orqali to\'lov — O\'zbekistonning xavfsiz to\'lov tizimi. Barcha UzCard va Humo kartalar qo\'llab-quvvatlanadi.'
+    }</p>
+    <div class="billing-cards">
+      <div class="billing-card-item"><i class="fas fa-credit-card"></i> UzCard</div>
+      <div class="billing-card-item"><i class="fas fa-credit-card"></i> Humo</div>
+      <div class="billing-card-item"><i class="fas fa-lock"></i> ${LANG==='ru'?'SSL защита':'SSL himoya'}</div>
+    </div>
+  </div>
+
+  ${!state.user ? `
+  <div class="billing-login-notice">
+    <i class="fas fa-circle-info" style="color:var(--primary);font-size:22px;"></i>
+    <div>
+      <b>${LANG==='ru'?'Войдите в аккаунт':'Akkauntga kiring'}</b>
+      <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">
+        ${LANG==='ru'?'Для оформления подписки необходимо войти в аккаунт':'Obuna olish uchun akkauntga kirishingiz kerak'}
+      </div>
+    </div>
+    <button class="btn btn-primary btn-sm" id="btn-plans-login">
+      <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
+    </button>
+  </div>` : ''}
+
+  <!-- История платежей -->
+  ${state.user ? `<div id="billing-history-section"><div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;"><i class="fas fa-spinner fa-spin"></i></div></div>` : ''}
+</div>`;
+
+  // Attach events
+  document.getElementById('btn-plans-login')?.addEventListener('click', () => {
+    showAuthScreen(() => navigate('plans'));
+  });
+
+  document.querySelectorAll('[data-plan-select]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const planId = btn.dataset.planSelect;
+      if (!state.user) {
+        showAuthScreen(() => navigate('plans'));
+        return;
+      }
+      if (planId === 'free') {
+        toast(LANG==='ru'?'Бесплатный план уже активен':'Bepul tarif allaqachon faol', 'info');
+        return;
+      }
+      await handlePlanPurchase(planId, btn);
+    });
+  });
+
+  // Load payment history
+  if (state.user) {
+    loadBillingHistory();
+  }
+}
+
+async function handlePlanPurchase(planId, btn) {
+  const origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Создаём заказ…':'Buyurtma yaratilmoqda…'}`;
+
+  const r = await API.createOrder(planId);
+
+  btn.disabled = false;
+  btn.innerHTML = origHtml;
+
+  if (!r.ok) {
+    if (r.data?.payme_configured === false) {
+      showModal(`
+        <div style="text-align:center;padding:24px 16px;">
+          <div style="font-size:48px;margin-bottom:16px;">⚙️</div>
+          <h3 style="margin-bottom:12px;">${LANG==='ru'?'Payme не настроен':'Payme sozlanmagan'}</h3>
+          <p style="color:var(--text-muted);font-size:14px;line-height:1.5;">
+            ${LANG==='ru'
+              ? 'Для приёма платежей необходимо добавить ключи Payme в настройки приложения.<br><br>Добавьте переменные окружения:<br><code>PAYME_MERCHANT_ID</code><br><code>PAYME_SECRET_KEY</code><br><code>PAYME_TEST_SECRET_KEY</code>'
+              : 'To\'lov qabul qilish uchun Payme kalitlarini qo\'shish kerak.'
+            }
+          </p>
+          <button class="btn btn-secondary" onclick="document.getElementById('modal-root').innerHTML=''">
+            ${LANG==='ru'?'Понятно':'Tushundim'}
+          </button>
+        </div>`);
+      return;
+    }
+    toast(r.data?.error || (LANG==='ru'?'Ошибка создания заказа':'Buyurtma yaratishda xatolik'), 'error');
+    return;
+  }
+
+  if (r.data.checkout_url) {
+    // Открываем Payme checkout
+    window.open(r.data.checkout_url, '_blank');
+    toast(LANG==='ru'?'Откроется страница оплаты Payme':'Payme to\'lov sahifasi ochiladi', 'info', 5000);
+  } else {
+    toast(LANG==='ru'?'Заказ создан, но ссылка на оплату недоступна':'Buyurtma yaratildi, lekin to\'lov havolasi yo\'q', 'warning');
+  }
+}
+
+async function loadBillingHistory() {
+  const section = document.getElementById('billing-history-section');
+  if (!section) return;
+
+  const r = await API.getBillingHistory();
+  if (!r.ok || !r.data.payments?.length) {
+    section.innerHTML = '';
+    return;
+  }
+
+  const payments = r.data.payments;
+  const statusLabel = {
+    pending:   { ru: '⏳ Ожидает', uz: '⏳ Kutilmoqda' },
+    paid:      { ru: '✅ Оплачено', uz: '✅ To\'langan' },
+    cancelled: { ru: '❌ Отменён', uz: '❌ Bekor qilingan' },
+    failed:    { ru: '⚠️ Ошибка', uz: '⚠️ Xatolik' },
+  };
+
+  section.innerHTML = `
+<div class="billing-history">
+  <div style="font-size:16px;font-weight:700;margin-bottom:16px;">
+    <i class="fas fa-receipt" style="color:var(--primary)"></i>
+    ${LANG==='ru'?'История платежей':'To\'lov tarixi'}
+  </div>
+  <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border);">
+          <th style="text-align:left;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Дата':'Sana'}</th>
+          <th style="text-align:left;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Тариф':'Tarif'}</th>
+          <th style="text-align:right;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Сумма':'Summa'}</th>
+          <th style="text-align:center;padding:8px 12px;color:var(--text-muted);">${LANG==='ru'?'Статус':'Holat'}</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${payments.map(p => `
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:10px 12px;">${new Date(p.created_at * 1000).toLocaleDateString('ru-RU')}</td>
+          <td style="padding:10px 12px;font-weight:600;">${escHtml(LANG==='ru'?p.plan.name.ru:p.plan.name.uz)}</td>
+          <td style="padding:10px 12px;text-align:right;font-weight:700;">${p.amount_uzs.toLocaleString('ru-RU')} ${LANG==='ru'?'сум':'so\'m'}</td>
+          <td style="padding:10px 12px;text-align:center;">${(statusLabel[p.status]||{ru:p.status,uz:p.status})[LANG]}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+</div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════
 function renderSettings() {
@@ -4146,7 +4449,25 @@ async function init() {
     return;
   }
 
-  // 7. Show auth if first time
+  // 7. Handle Payme return URL (?payment_order=...)
+  const paymentOrder = params.get('payment_order');
+  if (paymentOrder) {
+    history.replaceState({}, '', location.pathname);
+    renderApp();
+    // Show payment result toast after short delay
+    setTimeout(() => {
+      toast(
+        LANG === 'ru'
+          ? '✅ Платёж обрабатывается. Подписка будет активирована в течение минуты.'
+          : '✅ To\'lov qayta ishlanmoqda. Obuna bir daqiqa ichida faollashadi.',
+        'success', 6000
+      );
+      navigate('plans');
+    }, 500);
+    return;
+  }
+
+  // 8. Show auth if first time
   if (!state.user) {
     showAuthScreen(()=>renderApp());
     return;
