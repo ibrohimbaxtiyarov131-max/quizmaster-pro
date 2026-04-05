@@ -618,13 +618,18 @@ function renderEditor(editId) {
   if (!area) return;
 
   // Load or create quiz
+  // IMPORTANT: if state.editQuiz already has _importedFlag set, keep it (came from import)
   if (editId) {
     const found = state.quizzes.find(q=>q.id===editId);
     if (found) state.editQuiz = deepClone(found);
     else state.editQuiz = newQuizTemplate();
-  } else {
+  } else if (!state.editQuiz || !state.editQuiz._importedFlag) {
+    // Only create new template if NOT coming from import
     state.editQuiz = newQuizTemplate();
   }
+  // Clear the import flag after consuming it
+  if (state.editQuiz) delete state.editQuiz._importedFlag;
+
   if (state.editQIndex < 0 || state.editQIndex >= state.editQuiz.questions.length) {
     state.editQIndex = state.editQuiz.questions.length > 0 ? 0 : -1;
   }
@@ -1854,62 +1859,113 @@ function showImportModal() {
   <button class="btn btn-primary" id="btn-apply-import" disabled><i class="fas fa-check"></i> ${t('importQuestions')}</button>
 </div>`, 'modal-lg');
 
-  // Format tabs
-  document.querySelectorAll('.fmt-tab').forEach(tab=>{
-    tab.addEventListener('click',()=>{
-      document.querySelectorAll('.fmt-tab').forEach(t2=>t2.classList.remove('active'));
-      document.querySelectorAll('.fmt-panel').forEach(p=>p.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById(`fmt-${tab.dataset.fmt}`)?.classList.add('active');
+  // Use requestAnimationFrame so modal DOM is ready before attaching events
+  requestAnimationFrame(() => {
+    // Format tabs
+    document.querySelectorAll('.fmt-tab').forEach(tab=>{
+      tab.addEventListener('click',()=>{
+        document.querySelectorAll('.fmt-tab').forEach(t2=>t2.classList.remove('active'));
+        document.querySelectorAll('.fmt-panel').forEach(p=>p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`fmt-${tab.dataset.fmt}`)?.classList.add('active');
+      });
     });
-  });
 
-  // Drop zones
-  setupDropZone('drop-zone-word', 'file-word', ['docx','txt'], handleWordFile);
-  setupDropZone('drop-zone-json', 'file-json', ['json'], handleJsonFile);
-  setupDropZone('drop-zone-excel', 'file-excel', ['xlsx','csv','xls'], handleExcelFile);
+    // Drop zones — attach after DOM is ready
+    setupDropZone('drop-zone-word',  'file-word',  ['docx','txt'],       handleWordFile);
+    setupDropZone('drop-zone-json',  'file-json',  ['json'],             handleJsonFile);
+    setupDropZone('drop-zone-excel', 'file-excel', ['xlsx','csv','xls'], handleExcelFile);
+  });
 }
 
 function setupDropZone(zoneId, inputId, exts, handler) {
-  const zone = document.getElementById(zoneId);
+  const zone  = document.getElementById(zoneId);
   const input = document.getElementById(inputId);
-  if (!zone||!input) return;
-  zone.addEventListener('click',()=>input.click());
-  input.addEventListener('change',()=>{ if(input.files[0]) handler(input.files[0]); });
-  zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('drag-over');});
-  zone.addEventListener('dragleave',()=>zone.classList.remove('drag-over'));
-  zone.addEventListener('drop',e=>{
-    e.preventDefault(); zone.classList.remove('drag-over');
-    const f=e.dataTransfer.files[0];
-    if(f&&exts.some(ext=>f.name.toLowerCase().endsWith('.'+ext))) handler(f);
-    else showImportError(LANG==='ru'?`Поддерживаемые форматы: ${exts.join(', ')}`:`Qo'llab-quvvatlanadigan formatlar: ${exts.join(', ')}`);
+  if (!zone || !input) return;
+
+  // Click on zone → open file dialog (ignore clicks that already came from input)
+  zone.addEventListener('click', e => {
+    if (e.target === input) return; // don't double-trigger
+    input.click();
   });
+
+  // File selected via dialog
+  input.addEventListener('change', () => {
+    const f = input.files[0];
+    if (!f) return;
+    showFileChosen(zoneId, f.name);
+    handler(f);
+  });
+
+  // Drag-and-drop
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && exts.some(ext => f.name.toLowerCase().endsWith('.' + ext))) {
+      showFileChosen(zoneId, f.name);
+      handler(f);
+    } else {
+      showImportError(LANG==='ru'
+        ? `Поддерживаемые форматы: ${exts.join(', ')}`
+        : `Qo'llab-quvvatlanadigan formatlar: ${exts.join(', ')}`);
+    }
+  });
+}
+
+function showFileChosen(zoneId, name) {
+  const zone = document.getElementById(zoneId);
+  if (!zone) return;
+  const hint = zone.querySelector('.drop-zone-hint');
+  if (hint) hint.innerHTML = `<i class="fas fa-file-check" style="color:var(--success)"></i> <b style="color:var(--success)">${escHtml(name)}</b> — ${LANG==='ru'?'обработка…':'qayta ishlash…'}`;
 }
 
 let pendingImportQuestions = null;
 
 function showImportPreview(questions) {
   pendingImportQuestions = questions;
-  const sec = document.getElementById('import-preview-section');
-  const cnt = document.getElementById('import-count-label');
+  console.log('[Import] Preview questions:', questions.length);
+
+  const sec  = document.getElementById('import-preview-section');
+  const cnt  = document.getElementById('import-count-label');
   const list = document.getElementById('import-preview-list');
-  const btn = document.getElementById('btn-apply-import');
-  if(!sec||!cnt||!list||!btn) return;
-  sec.style.display='block';
-  cnt.textContent = `${LANG==='ru'?'Найдено вопросов':'Topilgan savollar'}: ${questions.length}`;
+  const btn  = document.getElementById('btn-apply-import');
+  const errEl = document.getElementById('import-error');
+
+  if (!sec || !cnt || !list || !btn) {
+    console.error('[Import] Preview elements not found in DOM');
+    return;
+  }
+
+  // Hide any previous error
+  if (errEl) errEl.style.display = 'none';
+
+  sec.style.display = 'block';
+  cnt.innerHTML = `<i class="fas fa-check-circle" style="color:var(--success)"></i> `
+    + (LANG==='ru' ? `Найдено вопросов` : `Topilgan savollar`)
+    + `: <b>${questions.length}</b>`;
+
   list.innerHTML = questions.slice(0,8).map((q,i)=>`
   <div class="preview-item">
     <span class="preview-item-num">${i+1}.</span>
     <span class="preview-item-type">${getTypeLabel(q.type)}</span>
     <span>${escHtml((q.question||'').slice(0,72))}</span>
-  </div>`).join('') + (questions.length>8?`<div style="color:var(--text-muted);font-size:13px;padding:8px 14px">+ ещё ${questions.length-8}</div>`:'');
-  btn.disabled = false;
-  document.getElementById('import-error').style.display='none';
+  </div>`).join('')
+  + (questions.length > 8
+    ? `<div style="color:var(--text-muted);font-size:13px;padding:8px 14px">+ ${LANG==='ru'?'ещё':'yana'} ${questions.length-8}</div>`
+    : '');
 
-  document.getElementById('btn-apply-import').onclick = ()=>{
+  // Enable and bind apply button (replace any old handler)
+  btn.disabled = false;
+  const newBtn = btn.cloneNode(true); // remove old listeners
+  btn.parentNode.replaceChild(newBtn, btn);
+  newBtn.addEventListener('click', () => {
+    console.log('[Import] Apply clicked, questions:', pendingImportQuestions?.length);
     if (!pendingImportQuestions?.length) return;
     applyImportToEditor(pendingImportQuestions);
-  };
+  });
 }
 
 function showImportError(msg) {
@@ -1918,17 +1974,20 @@ function showImportError(msg) {
 }
 
 function applyImportToEditor(questions) {
-  // If editor is open — append to editQuiz; otherwise create new
-  if (state.editQuiz) {
-    state.editQuiz.questions.push(...questions);
-    state.editQIndex = state.editQuiz.questions.length-1;
-  } else {
+  // Always create a fresh quiz with imported questions (mark with flag to prevent override)
+  if (!state.editQuiz || !state.editQuiz.title) {
+    // No active editor — create new quiz
     state.editQuiz = newQuizTemplate();
-    state.editQuiz.questions = questions;
-    state.editQIndex = 0;
+    state.editQuiz.questions = questions.map((q,i)=>({...q, id: q.id||genId()}));
+  } else {
+    // Editor open — append
+    state.editQuiz.questions.push(...questions.map(q=>({...q, id: q.id||genId()})));
   }
+  state.editQIndex = state.editQuiz.questions.length > 0 ? 0 : -1;
+  // Set flag so renderEditor doesn't overwrite with empty template
+  state.editQuiz._importedFlag = true;
   closeModal();
-  toast(t('importSuccess'), 'success');
+  toast(t('importSuccess') + ' — ' + pluralQ(questions.length), 'success');
   navigate('create-quiz');
 }
 
