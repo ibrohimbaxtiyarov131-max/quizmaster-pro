@@ -1,7 +1,10 @@
 import { Hono } from 'hono'
-import { serveStatic } from 'hono/cloudflare-workers'
 import { questions as defaultQuestions, quizConfig as defaultQuizConfig } from './questions'
 import type { Question, QuizConfig } from './questions'
+import { TEMPLATE_DOCX_B64 } from './template-docx'
+// Импортируем статические файлы как текст (Vite raw imports)
+// @ts-ignore
+import quizUploadJs from '../public/static/quiz-upload.js?raw'
 
 const app = new Hono()
 
@@ -28,8 +31,30 @@ function validateQuestion(q: unknown, idx: number): string | null {
   return null
 }
 
-// Отдаём статику
-app.use('/static/*', serveStatic({ root: './' }))
+// Отдаём статику: quiz-upload.js (встроен в бандл)
+app.get('/js/quiz-upload.js', (c) => {
+  c.header('Content-Type', 'application/javascript; charset=utf-8')
+  c.header('Cache-Control', 'public, max-age=3600')
+  return c.body(quizUploadJs)
+})
+
+// style.css
+app.get('/static/style.css', (c) => {
+  c.header('Content-Type', 'text/css; charset=utf-8')
+  return c.body('')
+})
+
+// Шаблон Word (.docx) — встроен в бандл как base64
+app.get('/api/template-word', (c) => {
+  // Декодируем base64 → бинарный буфер
+  const binaryStr = atob(TEMPLATE_DOCX_B64)
+  const bytes = new Uint8Array(binaryStr.length)
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+  c.header('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+  c.header('Content-Disposition', 'attachment; filename="quiz-template.docx"')
+  c.header('Cache-Control', 'public, max-age=86400')
+  return c.body(bytes.buffer)
+})
 
 // API: получить данные квиза
 app.get('/api/quiz', (c) => {
@@ -1362,6 +1387,99 @@ app.get('/', (c) => {
     }
     .template-link:hover { color: var(--primary-dark); border-bottom-style: solid; }
 
+    /* ─── Вкладки форматов ─── */
+    .fmt-tabs {
+      display: flex;
+      gap: 6px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 5px;
+    }
+    .fmt-tab {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 9px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: var(--transition);
+      color: var(--text-muted);
+      background: transparent;
+    }
+    .fmt-tab:hover { background: var(--card); color: var(--text); }
+    .fmt-tab.active {
+      background: var(--card);
+      color: var(--text);
+      box-shadow: 0 1px 4px rgba(0,0,0,.1);
+    }
+    .fmt-tab.active#tab-word { color: #2563eb; }
+    .fmt-tab.active#tab-json { color: #059669; }
+    .fmt-tab i { font-size: 14px; }
+
+    /* ─── Инфо-блок формата ─── */
+    .fmt-panel { animation: fadeIn .2s ease; }
+    .fmt-info {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+    .fmt-info-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .fmt-info-body {
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .fmt-info-body p { color: var(--text); font-size: 13px; }
+    .fmt-code {
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .fmt-code strong { color: #fbbf24; }
+    .fmt-code code { color: #86efac; }
+
+    /* ─── Статус разбора Word ─── */
+    .parse-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      color: #1d4ed8;
+      font-weight: 500;
+    }
+    .parse-status i { flex-shrink: 0; }
+    .parse-status.success { background: var(--success-light); border-color: #a7f3d0; color: #065f46; }
+    .parse-status.error   { background: var(--danger-light);  border-color: #fecaca; color: #b91c1c; }
+
     /* ─── Активный квиз индикатор в шапке ─── */
     .custom-quiz-badge {
       display: none;
@@ -1440,7 +1558,7 @@ app.get('/', (c) => {
         <div class="drop-zone" id="drop-zone"
              ondragover="onDragOver(event)" ondragleave="onDragLeave(event)"
              ondrop="onDrop(event)" onclick="triggerFileInput()">
-          <input type="file" id="file-input" accept=".json,application/json"
+          <input type="file" id="file-input" accept=".json,.docx,.doc,.txt"
                  style="display:none" onchange="onFileSelected(event)" />
           <div class="drop-zone-icon" id="dz-icon">
             <i class="fas fa-cloud-upload-alt"></i>
@@ -1449,7 +1567,11 @@ app.get('/', (c) => {
             <strong>Перетащите файл сюда</strong><br>
             или <span class="dz-link">нажмите для выбора</span>
           </div>
-          <div class="drop-zone-hint">Поддерживается .json · Максимум 200 вопросов</div>
+          <div class="drop-zone-hint" id="dz-hint">
+            <i class="fas fa-file-word" style="color:#2563eb"></i> .docx (Word) &nbsp;·&nbsp;
+            <i class="fas fa-file-alt" style="color:#7c3aed"></i> .txt &nbsp;·&nbsp;
+            <i class="fas fa-file-code" style="color:#059669"></i> .json
+          </div>
         </div>
 
         <!-- Статус файла -->
@@ -1479,13 +1601,68 @@ app.get('/', (c) => {
           <span id="upload-error-text"></span>
         </div>
 
-        <!-- Шаблон -->
-        <div class="template-row">
-          <i class="fas fa-info-circle"></i>
-          Не знаете формат?
-          <a href="/api/template" download="quiz-template.json" class="template-link">
-            <i class="fas fa-download"></i> Скачать шаблон JSON
-          </a>
+        <!-- Вкладки форматов -->
+        <div class="fmt-tabs" id="fmt-tabs">
+          <button class="fmt-tab active" id="tab-word" onclick="switchFmtTab('word')">
+            <i class="fas fa-file-word"></i> Word / TXT
+          </button>
+          <button class="fmt-tab" id="tab-json" onclick="switchFmtTab('json')">
+            <i class="fas fa-file-code"></i> JSON
+          </button>
+        </div>
+
+        <!-- Инструкция Word / TXT -->
+        <div class="fmt-panel" id="panel-word">
+          <div class="fmt-info">
+            <div class="fmt-info-title"><i class="fas fa-align-left"></i> Формат Word / TXT — как писать вопросы</div>
+            <div class="fmt-info-body">
+              <p>Пишите вопросы в любом удобном стиле. Парсер распознаёт большинство форматов автоматически.</p>
+              <div class="fmt-code">
+<span style="color:#93c5fd;font-weight:700">1.</span> Текст вопроса с одним правильным ответом?<br>
+A) Вариант А<br>
+B) Вариант Б<span style="color:#fbbf24">*</span>&nbsp;&nbsp;<span style="color:#6b7280">← звёздочка = правильный</span><br>
+C) Вариант В<br>
+NOTE: Пояснение (необязательно)<br>
+<br>
+<span style="color:#93c5fd;font-weight:700">2.</span> [MULTIPLE] Вопрос — несколько верных ответов?<br>
+A) Верный<span style="color:#fbbf24">*</span><br>
+B) Неверный<br>
+C) Тоже верный<span style="color:#fbbf24">*</span><br>
+<br>
+<span style="color:#93c5fd;font-weight:700">3.</span> [TEXT] Вопрос с произвольным ответом?<br>
+ANSWER: ответ1 | синоним2<br>
+<br>
+<span style="color:#86efac">Ответ: Б</span>&nbsp;&nbsp;<span style="color:#6b7280">← тоже работает вместо *</span><br>
+<span style="color:#fbbf24">✓</span> или <span style="color:#fbbf24">✔</span>&nbsp;&nbsp;<span style="color:#6b7280">← тоже маркер правильного</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-muted);line-height:1.7">
+                <b>Нумерация</b> 1. 2. 3. — обязательна. &nbsp;
+                <b>Варианты</b>: A) B) C) или А) Б) В) или маркеры • – *.
+              </div>
+              <a href="/api/template-word" download="quiz-template.docx" class="template-link">
+                <i class="fas fa-file-word"></i> Скачать шаблон Word (.docx)
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Инструкция JSON -->
+        <div class="fmt-panel hidden" id="panel-json">
+          <div class="fmt-info">
+            <div class="fmt-info-title"><i class="fas fa-code"></i> Формат JSON</div>
+            <div class="fmt-info-body">
+              <p>Файл содержит массив вопросов или объект <code>{ config, questions }</code>:</p>
+              <div class="fmt-code">[{<br>
+&nbsp;&nbsp;"id": 1, "type": "single",<br>
+&nbsp;&nbsp;"question": "Вопрос?",<br>
+&nbsp;&nbsp;"options": ["А","Б","В"],<br>
+&nbsp;&nbsp;"correct": "Б"<br>
+}]</div>
+              <a href="/api/template" download="quiz-template.json" class="template-link">
+                <i class="fas fa-download"></i> Скачать шаблон JSON
+              </a>
+            </div>
+          </div>
         </div>
 
       </div>
@@ -2098,223 +2275,12 @@ function escHtml(str) {
 
 // ─── Запуск ──────────────────────────────────────────────────
 loadQuiz()
-
-// ════════════════════════════════════════════════════════════
-//  ЛОГИКА ЗАГРУЗКИ ВОПРОСОВ
-// ════════════════════════════════════════════════════════════
-
-let uploadedData = null  // распарсенные данные из файла
-let isCustomQuiz = false
-
-// ── Открытие/закрытие модалки ────────────────────────────
-function openUploadModal() {
-  const modal = document.getElementById('upload-modal')
-  modal.classList.add('open')
-  document.body.style.overflow = 'hidden'
-}
-
-function closeUploadModal() {
-  const modal = document.getElementById('upload-modal')
-  modal.classList.remove('open')
-  document.body.style.overflow = ''
-}
-
-function onBackdropClick(e) {
-  if (e.target === document.getElementById('upload-modal')) closeUploadModal()
-}
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeUploadModal()
-})
-
-// ── Drag & Drop ──────────────────────────────────────────
-function onDragOver(e) {
-  e.preventDefault()
-  document.getElementById('drop-zone').classList.add('drag-over')
-}
-
-function onDragLeave() {
-  document.getElementById('drop-zone').classList.remove('drag-over')
-}
-
-function onDrop(e) {
-  e.preventDefault()
-  document.getElementById('drop-zone').classList.remove('drag-over')
-  const file = e.dataTransfer.files[0]
-  if (file) processFile(file)
-}
-
-function triggerFileInput() {
-  document.getElementById('file-input').click()
-}
-
-function onFileSelected(e) {
-  const file = e.target.files[0]
-  if (file) processFile(file)
-}
-
-// ── Обработка файла ──────────────────────────────────────
-function processFile(file) {
-  hideUploadError()
-  clearPreview()
-
-  if (!file.name.toLowerCase().endsWith('.json')) {
-    showUploadError('Поддерживаются только .json файлы')
-    return
-  }
-  if (file.size > 2 * 1024 * 1024) {
-    showUploadError('Файл слишком большой (максимум 2 МБ)')
-    return
-  }
-
-  const reader = new FileReader()
-  reader.onload = (ev) => {
-    try {
-      const parsed = JSON.parse(ev.target.result)
-      uploadedData = parsed
-
-      const kb = (file.size / 1024).toFixed(1)
-      document.getElementById('file-status').classList.remove('hidden')
-      document.getElementById('fs-name').textContent = file.name
-      document.getElementById('fs-meta').textContent = kb + ' КБ'
-      document.getElementById('drop-zone').classList.add('has-file')
-
-      let questions = []
-      if (Array.isArray(parsed)) {
-        questions = parsed
-      } else if (Array.isArray(parsed.questions)) {
-        questions = parsed.questions
-      }
-
-      if (questions.length === 0) {
-        showUploadError('В файле нет вопросов')
-        uploadedData = null
-        return
-      }
-
-      renderUploadPreview(questions)
-      document.getElementById('btn-apply-upload').disabled = false
-      document.getElementById('dz-icon').innerHTML = '<i class="fas fa-check-circle"></i>'
-
-    } catch (err) {
-      showUploadError('Ошибка чтения файла: ' + err.message)
-      uploadedData = null
-    }
-  }
-  reader.readAsText(file, 'utf-8')
-}
-
-// ── Предпросмотр ─────────────────────────────────────────
-function renderUploadPreview(questions) {
-  const block = document.getElementById('preview-block')
-  const list  = document.getElementById('preview-list')
-  const count = document.getElementById('preview-count')
-
-  block.classList.remove('hidden')
-  count.textContent = questions.length + ' ' + pluralQ(questions.length)
-
-  const typeLabel = { single: 'Один', multiple: 'Несколько', text: 'Текст' }
-
-  list.innerHTML = questions.slice(0, 8).map((q, i) => {
-    const tl  = typeLabel[q.type] || q.type || '?'
-    const cls = q.type || 'single'
-    const qText = typeof q.question === 'string'
-      ? (q.question.length > 72 ? q.question.slice(0, 72) + '…' : q.question)
-      : '(нет текста)'
-    return '<div class="preview-item">' +
-      '<div class="preview-item-num">' + (i + 1) + '</div>' +
-      '<div class="preview-item-q">' + escHtml(qText) + '</div>' +
-      '<div class="preview-item-type ' + cls + '">' + tl + '</div>' +
-    '</div>'
-  }).join('') + (questions.length > 8
-    ? '<div class="preview-item" style="color:var(--text-muted);font-size:13px;padding:8px 16px;">… и ещё ' + (questions.length - 8) + ' вопросов</div>'
-    : '')
-}
-
-function pluralQ(n) {
-  if (n % 10 === 1 && n % 100 !== 11) return 'вопрос'
-  if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'вопроса'
-  return 'вопросов'
-}
-
-// ── Очистка файла ────────────────────────────────────────
-function clearFile() {
-  uploadedData = null
-  document.getElementById('file-input').value = ''
-  document.getElementById('file-status').classList.add('hidden')
-  document.getElementById('drop-zone').classList.remove('has-file')
-  document.getElementById('dz-icon').innerHTML = '<i class="fas fa-cloud-upload-alt"></i>'
-  document.getElementById('btn-apply-upload').disabled = true
-  clearPreview()
-  hideUploadError()
-}
-
-function clearPreview() {
-  document.getElementById('preview-block').classList.add('hidden')
-  document.getElementById('preview-list').innerHTML = ''
-}
-
-function showUploadError(msg) {
-  document.getElementById('upload-error-text').textContent = msg
-  document.getElementById('upload-error').classList.remove('hidden')
-}
-
-function hideUploadError() {
-  document.getElementById('upload-error').classList.add('hidden')
-}
-
-// ── Применить файл ───────────────────────────────────────
-async function applyUpload() {
-  if (!uploadedData) return
-
-  const btn = document.getElementById('btn-apply-upload')
-  btn.disabled = true
-  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Применяю…'
-
-  try {
-    const res = await fetch('/api/upload-quiz', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(uploadedData),
-    })
-    const json = await res.json()
-
-    if (!json.ok) {
-      showUploadError(json.error || 'Ошибка на сервере')
-      btn.disabled = false
-      btn.innerHTML = '<i class="fas fa-check"></i> Применить'
-      return
-    }
-
-    isCustomQuiz = true
-    document.getElementById('custom-badge').classList.add('visible')
-    closeUploadModal()
-    showToast('Загружено ' + json.loaded + ' ' + pluralQ(json.loaded) + '!', 'success', 3500)
-    await loadQuiz()
-    clearFile()
-
-  } catch (e) {
-    showUploadError('Сетевая ошибка: ' + e.message)
-    btn.disabled = false
-    btn.innerHTML = '<i class="fas fa-check"></i> Применить'
-  }
-}
-
-// ── Сброс к дефолтным вопросам ───────────────────────────
-async function resetToDefault() {
-  try {
-    await fetch('/api/reset-quiz', { method: 'POST' })
-    isCustomQuiz = false
-    document.getElementById('custom-badge').classList.remove('visible')
-    closeUploadModal()
-    clearFile()
-    await loadQuiz()
-    showToast('Возвращены встроенные вопросы', '', 2500)
-  } catch (e) {
-    showUploadError('Ошибка сброса: ' + e.message)
-  }
-}
 </script>
+
+<!-- mammoth.js для чтения .docx в браузере -->
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+<!-- Логика загрузки файлов и умный парсер -->
+<script src="/js/quiz-upload.js"></script>
 </body>
 </html>`)
 })
