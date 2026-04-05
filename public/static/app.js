@@ -472,7 +472,35 @@ function toast(msg, type='info', dur=3000) {
   setTimeout(() => { el.classList.add('fade-out'); setTimeout(()=>el.remove(), 300); }, dur);
 }
 function confirm(msg, cb) {
-  if (window.confirm(msg)) cb();
+  // Кастомный красивый диалог подтверждения вместо window.confirm
+  const existing = document.getElementById('confirm-modal-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'confirm-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--card,#fff);border-radius:16px;padding:28px 24px;max-width:380px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3);text-align:center;">
+      <div style="width:56px;height:56px;background:rgba(239,68,68,0.1);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;">
+        <i class="fas fa-trash" style="color:#ef4444;font-size:22px;"></i>
+      </div>
+      <div style="font-size:17px;font-weight:700;color:var(--text,#111);margin-bottom:8px;">${LANG==='ru'?'Удалить тест?':'Testni o\'chirish?'}</div>
+      <div style="font-size:14px;color:var(--text-muted,#666);margin-bottom:24px;">${msg}</div>
+      <div style="display:flex;gap:10px;justify-content:center;">
+        <button id="confirm-cancel-btn" style="flex:1;padding:11px 20px;border:1px solid var(--border,#e5e7eb);background:var(--card,#fff);color:var(--text,#111);border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">
+          ${LANG==='ru'?'Отмена':'Bekor qilish'}
+        </button>
+        <button id="confirm-ok-btn" style="flex:1;padding:11px 20px;background:#ef4444;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">
+          <i class="fas fa-trash"></i> ${LANG==='ru'?'Удалить':'O\'chirish'}
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#confirm-cancel-btn').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('#confirm-ok-btn').addEventListener('click', () => { overlay.remove(); cb(); });
+  // Close on backdrop click
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 }
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 
@@ -2077,8 +2105,55 @@ function renderSettings() {
   const titleEl = document.getElementById('topbar-title');
   if (!area) return;
   if (titleEl) titleEl.textContent = t('settings');
+
+  const u = state.user;
+  const initials = u ? getInitials(u.name) : '?';
+  const providerIcons = { google:'fab fa-google', facebook:'fab fa-facebook-f', apple:'fab fa-apple', whatsapp:'fab fa-whatsapp', email:'fas fa-envelope', guest:'fas fa-user-secret' };
+  const providerColors = { google:'#4285F4', facebook:'#1877f2', apple:'#000', whatsapp:'#25d366', email:'var(--primary)', guest:'var(--text-muted)' };
+  const providerIcon = u ? (providerIcons[u.provider] || 'fas fa-user') : 'fas fa-user';
+  const providerColor = u ? (providerColors[u.provider] || 'var(--primary)') : 'var(--text-muted)';
+  const providerLabel = u ? ({google:'Google', facebook:'Facebook', apple:'Apple', whatsapp:'WhatsApp', email:'Email', guest: LANG==='ru'?'Гость':'Mehmon'}[u.provider] || u.provider) : '';
+
   area.innerHTML = `
 <div class="grid-2">
+
+  <!-- ══ АККАУНТ ══ -->
+  <div class="card" style="grid-column:1/-1">
+    <div style="font-size:16px;font-weight:700;margin-bottom:16px"><i class="fas fa-user-circle" style="color:var(--primary)"></i> ${LANG==='ru'?'Аккаунт':'Akkaunt'}</div>
+    ${u ? `
+    <div style="display:flex;align-items:center;gap:16px;padding:14px;background:var(--bg);border-radius:12px;margin-bottom:16px;flex-wrap:wrap;">
+      <div style="width:52px;height:52px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;">
+        ${u.avatar && u.avatar.length <= 4 && u.avatar.match(/\p{Emoji}/u) ? u.avatar : `<span style="color:#fff;font-weight:700;font-size:18px;">${initials}</span>`}
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:700;font-size:16px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(u.name)}</div>
+        <div style="font-size:13px;color:var(--text-muted);margin-top:2px;">${u.email ? escHtml(u.email) : (LANG==='ru'?'Email не указан':'Email ko\'rsatilmagan')}</div>
+        <div style="font-size:12px;color:${providerColor};margin-top:4px;font-weight:600;">
+          <i class="${providerIcon}"></i> ${providerLabel}
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="btn-edit-profile"><i class="fas fa-pen"></i> ${LANG==='ru'?'Изменить имя':'Ismni o\'zgartirish'}</button>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-warning btn-sm" id="btn-switch-account">
+        <i class="fas fa-exchange-alt"></i> ${LANG==='ru'?'Сменить аккаунт':'Akkauntni almashtirish'}
+      </button>
+      <button class="btn btn-danger btn-sm" id="btn-logout">
+        <i class="fas fa-sign-out-alt"></i> ${LANG==='ru'?'Выйти из аккаунта':'Akkauntdan chiqish'}
+      </button>
+    </div>
+    ` : `
+    <div style="text-align:center;padding:20px;">
+      <div style="font-size:40px;margin-bottom:12px;">👤</div>
+      <div style="font-size:15px;color:var(--text-muted);margin-bottom:16px;">${LANG==='ru'?'Вы не вошли в аккаунт. Войдите чтобы тесты были доступны с любого устройства.':'Akkauntga kirmagansiz. Boshqa qurilmalardan foydalanish uchun kiring.'}</div>
+      <button class="btn btn-primary" id="btn-login-settings">
+        <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти в аккаунт':'Akkauntga kirish'}
+      </button>
+    </div>
+    `}
+  </div>
+
+  <!-- ══ ЯЗЫК ══ -->
   <div class="card">
     <div style="font-size:16px;font-weight:700;margin-bottom:16px"><i class="fas fa-language" style="color:var(--primary)"></i> ${t('lang')}</div>
     <div class="settings-row">
@@ -2090,6 +2165,8 @@ function renderSettings() {
       <label class="toggle"><input type="radio" name="lang" value="uz" ${LANG==='uz'?'checked':''} id="lang-uz"><span class="toggle-slider"></span></label>
     </div>
   </div>
+
+  <!-- ══ ДАННЫЕ ══ -->
   <div class="card">
     <div style="font-size:16px;font-weight:700;margin-bottom:16px"><i class="fas fa-database" style="color:var(--primary)"></i> ${LANG==='ru'?'Данные':'Ma\'lumotlar'}</div>
     <div class="settings-row">
@@ -2106,10 +2183,30 @@ function renderSettings() {
       <button class="btn btn-secondary btn-sm" id="btn-import-file"><i class="fas fa-upload"></i> ${t('importQuestions')}</button>
     </div>
   </div>
+
+</div>
+
+<!-- Модал редактирования имени -->
+<div id="edit-profile-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:var(--card,#fff);border-radius:16px;padding:28px 24px;max-width:380px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+    <div style="font-size:17px;font-weight:700;margin-bottom:16px;"><i class="fas fa-pen" style="color:var(--primary)"></i> ${LANG==='ru'?'Изменить имя':'Ismni o\'zgartirish'}</div>
+    <input id="edit-profile-name" class="auth-name-input" type="text" maxlength="40"
+      value="${u ? escHtml(u.name) : ''}"
+      placeholder="${LANG==='ru'?'Ваше имя':'Ismingiz'}"
+      style="margin-bottom:12px;">
+    <div id="edit-profile-error" style="display:none;color:#ef4444;font-size:13px;margin-bottom:10px;"></div>
+    <div style="display:flex;gap:10px;">
+      <button id="edit-profile-cancel" class="btn btn-secondary" style="flex:1;">${LANG==='ru'?'Отмена':'Bekor'}</button>
+      <button id="edit-profile-save" class="btn btn-primary" style="flex:1;"><i class="fas fa-check"></i> ${LANG==='ru'?'Сохранить':'Saqlash'}</button>
+    </div>
+  </div>
 </div>`;
 
+  // ── Язык ──
   document.getElementById('lang-ru')?.addEventListener('change',()=>{LANG='ru';localStorage.setItem('qm_lang','ru');renderApp();});
   document.getElementById('lang-uz')?.addEventListener('change',()=>{LANG='uz';localStorage.setItem('qm_lang','uz');renderApp();});
+
+  // ── Данные ──
   document.getElementById('btn-clear-all')?.addEventListener('click',()=>{
     confirm(LANG==='ru'?'Удалить все данные?':'Barcha ma\'lumotlarni o\'chirish?',()=>{
       localStorage.removeItem(STORAGE.QUIZZES);
@@ -2125,6 +2222,84 @@ function renderSettings() {
     downloadJson({ quizzes: state.quizzes, history: state.history, exported: Date.now() }, 'quizmaster-backup.json');
   });
   document.getElementById('btn-import-file')?.addEventListener('click', showImportModal);
+
+  // ── Аккаунт — не вошёл ──
+  document.getElementById('btn-login-settings')?.addEventListener('click', () => {
+    showAuthScreen(() => renderSettings());
+  });
+
+  // ── Аккаунт — вошёл ──
+
+  // Редактировать имя
+  const editModal = document.getElementById('edit-profile-modal');
+  document.getElementById('btn-edit-profile')?.addEventListener('click', () => {
+    if (editModal) editModal.style.display = 'flex';
+    document.getElementById('edit-profile-name')?.focus();
+  });
+  document.getElementById('edit-profile-cancel')?.addEventListener('click', () => {
+    if (editModal) editModal.style.display = 'none';
+  });
+  document.getElementById('edit-profile-save')?.addEventListener('click', async () => {
+    const nameVal = document.getElementById('edit-profile-name')?.value.trim();
+    const errEl = document.getElementById('edit-profile-error');
+    if (!nameVal) { if(errEl){errEl.textContent=LANG==='ru'?'Введите имя':'Ismni kiriting';errEl.style.display='';} return; }
+    const btn = document.getElementById('edit-profile-save');
+    if (btn) { btn.disabled=true; btn.innerHTML=`<i class="fas fa-spinner fa-spin"></i>`; }
+    const r = await API.updateProfile(nameVal, state.user?.avatar || '🧑');
+    if (btn) { btn.disabled=false; btn.innerHTML=`<i class="fas fa-check"></i> ${LANG==='ru'?'Сохранить':'Saqlash'}`; }
+    if (r.ok) {
+      saveUser({ ...state.user, name: nameVal });
+      if (editModal) editModal.style.display = 'none';
+      toast(LANG==='ru'?'Имя обновлено':'Ism yangilandi', 'success');
+      renderSettings();
+    } else {
+      if(errEl){errEl.textContent=LANG==='ru'?'Ошибка сохранения':'Saqlash xatosi';errEl.style.display='';}
+    }
+  });
+  document.getElementById('edit-profile-name')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('edit-profile-save')?.click();
+    if (e.key === 'Escape') { if(editModal) editModal.style.display='none'; }
+  });
+
+  // Сменить аккаунт (выход + показ экрана входа)
+  document.getElementById('btn-switch-account')?.addEventListener('click', async () => {
+    await API.logout().catch(()=>{});
+    setAuthToken(null);
+    saveUser(null);
+    state.user = null;
+    toast(LANG==='ru'?'Вы вышли из аккаунта. Войдите в новый.':'Akkauntdan chiqildi. Yangi akkauntga kiring.', 'info');
+    showAuthScreen(() => renderSettings());
+  });
+
+  // Выйти из аккаунта
+  document.getElementById('btn-logout')?.addEventListener('click', () => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+    overlay.innerHTML = `
+      <div style="background:var(--card,#fff);border-radius:16px;padding:28px 24px;max-width:360px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3);text-align:center;">
+        <div style="width:56px;height:56px;background:rgba(239,68,68,0.1);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;">
+          <i class="fas fa-sign-out-alt" style="color:#ef4444;font-size:22px;"></i>
+        </div>
+        <div style="font-size:17px;font-weight:700;margin-bottom:8px;">${LANG==='ru'?'Выйти из аккаунта?':'Akkauntdan chiqish?'}</div>
+        <div style="font-size:14px;color:var(--text-muted);margin-bottom:24px;">${LANG==='ru'?'Ваши тесты останутся на сервере. Вы сможете войти снова в любое время.':'Testlaringiz serverda saqlanadi. Istalgan vaqt qaytib kirishingiz mumkin.'}</div>
+        <div style="display:flex;gap:10px;">
+          <button id="logout-cancel" style="flex:1;padding:11px;border:1px solid var(--border,#e5e7eb);background:var(--card,#fff);color:var(--text,#111);border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">${LANG==='ru'?'Отмена':'Bekor'}</button>
+          <button id="logout-ok" style="flex:1;padding:11px;background:#ef4444;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;"><i class="fas fa-sign-out-alt"></i> ${LANG==='ru'?'Выйти':'Chiqish'}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#logout-cancel').addEventListener('click', () => overlay.remove());
+    overlay.querySelector('#logout-ok').addEventListener('click', async () => {
+      overlay.remove();
+      await API.logout().catch(()=>{});
+      setAuthToken(null);
+      saveUser(null);
+      state.user = null;
+      toast(LANG==='ru'?'Вы вышли из аккаунта':'Akkauntdan chiqildi', 'success');
+      renderSettings();
+    });
+    overlay.addEventListener('click', e => { if(e.target===overlay) overlay.remove(); });
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
