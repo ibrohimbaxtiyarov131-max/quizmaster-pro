@@ -4750,134 +4750,250 @@ function loadGoogleGSI() {
   });
 }
 
-function showAuthScreen(afterAuth) {
+function showAuthScreen(afterAuth, initialTab) {
   document.getElementById('auth-overlay')?.remove();
 
+  const isRu = LANG === 'ru';
   const overlay = document.createElement('div');
   overlay.className = 'auth-overlay';
   overlay.id = 'auth-overlay';
+
   overlay.innerHTML = `
-    <div class="auth-card">
-      <div class="auth-logo">
-        <div class="auth-logo-icon"><i class="fas fa-brain"></i></div>
-        <div class="auth-logo-text">${t('appName')}</div>
+<div class="auth-page">
+
+  <!-- ═══ LEFT: HERO панель ═══ -->
+  <div class="auth-hero">
+    <div class="auth-hero-inner">
+      <div class="auth-hero-logo">
+        <div class="auth-hero-icon"><i class="fas fa-brain"></i></div>
+        <span class="auth-hero-brand">QuizMaster Pro</span>
+      </div>
+      <h1 class="auth-hero-title">
+        ${isRu ? 'Создавайте тесты.<br>Проводите онлайн.' : 'Test yarating.<br>Onlayn o\'tkazing.'}
+      </h1>
+      <p class="auth-hero-desc">
+        ${isRu
+          ? 'Платформа для учителей, тренеров и компаний — создавайте тесты за минуты, проводите live-сессии и анализируйте результаты.'
+          : 'O\'qituvchilar, trenerlar va kompaniyalar uchun platforma — testlarni daqiqalarda yarating, live sessiyalar o\'tkazing.'}
+      </p>
+      <!-- Selling features -->
+      <div class="auth-features-grid">
+        <div class="auth-feature-item">
+          <i class="fas fa-bolt" style="color:#f59e0b"></i>
+          <span>${isRu ? 'Создание за минуты' : 'Daqiqalarda yaratish'}</span>
+        </div>
+        <div class="auth-feature-item">
+          <i class="fas fa-file-import" style="color:#6366f1"></i>
+          <span>${isRu ? 'Импорт Word / Excel' : 'Word / Excel import'}</span>
+        </div>
+        <div class="auth-feature-item">
+          <i class="fas fa-tower-broadcast" style="color:#10b981"></i>
+          <span>${isRu ? 'Live-сессии для групп' : 'Guruhlar uchun live'}</span>
+        </div>
+        <div class="auth-feature-item">
+          <i class="fas fa-chart-bar" style="color:#0ea5e9"></i>
+          <span>${isRu ? 'Аналитика и рейтинг' : 'Analitika va reyting'}</span>
+        </div>
+      </div>
+    </div>
+    <!-- Footer links -->
+    <div class="auth-hero-footer">
+      <a href="#" onclick="return false">${isRu ? 'Политика конфиденциальности' : 'Maxfiylik siyosati'}</a>
+      <span>·</span>
+      <a href="#" onclick="return false">${isRu ? 'Условия использования' : 'Foydalanish shartlari'}</a>
+      <span>·</span>
+      <a href="mailto:support@quizmaster.pro">${isRu ? 'Поддержка' : 'Qo\'llab-quvvatlash'}</a>
+    </div>
+  </div>
+
+  <!-- ═══ RIGHT: AUTH форма ═══ -->
+  <div class="auth-form-side">
+    <div class="auth-card-new">
+
+      <!-- Лого (мобильный) -->
+      <div class="auth-card-mobile-logo">
+        <div class="auth-hero-icon" style="width:36px;height:36px;font-size:18px;"><i class="fas fa-brain"></i></div>
+        <span style="font-size:18px;font-weight:800;color:#1e293b">QuizMaster Pro</span>
       </div>
 
-      <!-- TAB switcher -->
-      <div class="auth-tabs" id="auth-tabs">
-        <button class="auth-tab active" data-tab="social">${LANG==='ru'?'Соцсети':'Ijtimoiy'}</button>
-        <button class="auth-tab" data-tab="email">${LANG==='ru'?'Вход':'Kirish'}</button>
-        <button class="auth-tab" data-tab="register">${LANG==='ru'?'Регистрация':'Ro\'yxat'}</button>
+      <!-- Вкладки Войти / Зарегистрироваться -->
+      <div class="auth-tabs-new" id="auth-tabs">
+        <button class="auth-tab-new active" data-tab="login">${isRu ? 'Войти' : 'Kirish'}</button>
+        <button class="auth-tab-new" data-tab="register">${isRu ? 'Зарегистрироваться' : 'Ro\'yxatdan o\'tish'}</button>
       </div>
 
-      <!-- ══ SOCIAL tab ══ -->
-      <div class="auth-panel" id="auth-panel-social">
-        <div class="auth-subtitle" style="margin-bottom:14px;">${LANG==='ru'?'Выберите способ входа и введите ваши данные':'Kirish usulini tanlang va ma\'lumotlaringizni kiriting'}</div>
+      <!-- ══ LOGIN PANEL ══ -->
+      <div class="auth-panel-new" id="auth-panel-login">
 
-        <!-- Google — показываем форму с email -->
-        <button class="social-btn social-google" id="btn-google-real" data-provider="google">
-          <span class="social-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
-          <span class="social-label">${LANG==='ru'?'Войти через Google':'Google orqali kirish'}</span>
-          <i class="fas fa-arrow-right social-arrow"></i>
+        <!-- Google -->
+        <button class="social-btn-new social-google-new" id="btn-google-login" data-provider="google">
+          <span class="snb-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
+          <span class="snb-label">${isRu ? 'Войти через Google' : 'Google orqali kirish'}</span>
         </button>
 
-        <!-- Другие провайдеры — вводим имя + email -->
-        <button class="social-btn social-facebook" data-provider="facebook">
-          <span class="social-icon"><i class="fab fa-facebook-f" style="color:#1877f2"></i></span>
-          <span class="social-label">${LANG==='ru'?'Продолжить с Facebook':'Facebook orqali kirish'}</span>
-          <i class="fas fa-arrow-right social-arrow"></i>
-        </button>
-        <button class="social-btn social-apple" data-provider="apple">
-          <span class="social-icon"><i class="fab fa-apple" style="color:#000"></i></span>
-          <span class="social-label">${LANG==='ru'?'Продолжить с Apple':'Apple orqali kirish'}</span>
-          <i class="fas fa-arrow-right social-arrow"></i>
-        </button>
-        <button class="social-btn social-whatsapp" data-provider="whatsapp">
-          <span class="social-icon"><i class="fab fa-whatsapp" style="color:#25d366"></i></span>
-          <span class="social-label">${LANG==='ru'?'Продолжить с WhatsApp':'WhatsApp orqali kirish'}</span>
-          <i class="fas fa-arrow-right social-arrow"></i>
-        </button>
+        <!-- Divider -->
+        <div class="auth-or-divider"><span>${isRu ? 'или войти по email' : 'yoki email orqali'}</span></div>
 
-        <!-- Форма для Google/Facebook/Apple/WhatsApp -->
-        <div id="social-name-section" style="display:none;margin-top:14px;">
-          <div class="auth-divider" id="social-provider-divider">${LANG==='ru'?'Введите данные для Facebook':'Facebook ma\'lumotlarini kiriting'}</div>
+        <!-- Email login form -->
+        <form id="login-form" autocomplete="on" onsubmit="return false">
+          <div class="auth-field-group">
+            <label class="auth-field-label">Email</label>
+            <input class="auth-field-input" id="login-email" type="email" placeholder="you@example.com" autocomplete="email" required>
+          </div>
+          <div class="auth-field-group">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <label class="auth-field-label">${isRu ? 'Пароль' : 'Parol'}</label>
+              <a class="auth-forgot-link" id="btn-forgot-password">${isRu ? 'Забыли пароль?' : 'Parolni unutdingizmi?'}</a>
+            </div>
+            <div class="auth-password-wrap">
+              <input class="auth-field-input" id="login-password" type="password" placeholder="••••••••" autocomplete="current-password" required>
+              <button type="button" class="auth-eye-btn" id="toggle-login-pw"><i class="fas fa-eye"></i></button>
+            </div>
+          </div>
+          <div id="login-error" class="auth-error-new" style="display:none"></div>
+          <button class="auth-submit-new" id="login-submit-btn" type="submit">
+            <i class="fas fa-sign-in-alt"></i> ${isRu ? 'Войти' : 'Kirish'}
+          </button>
+        </form>
+
+        <!-- Другие способы -->
+        <div class="auth-other-ways">
+          <button class="auth-other-toggle" id="btn-other-ways-login">
+            <i class="fas fa-ellipsis-h"></i> ${isRu ? 'Другие способы входа' : 'Boshqa kirish usullari'}
+          </button>
+          <div class="auth-other-list" id="other-ways-login" style="display:none">
+            <button class="social-btn-small" data-provider="facebook">
+              <i class="fab fa-facebook-f" style="color:#1877f2"></i> Facebook
+            </button>
+            <button class="social-btn-small" data-provider="apple">
+              <i class="fab fa-apple" style="color:#333"></i> Apple
+            </button>
+            <button class="social-btn-small" data-provider="whatsapp">
+              <i class="fab fa-whatsapp" style="color:#25d366"></i> WhatsApp
+            </button>
+          </div>
+        </div>
+
+        <!-- Социальная форма (для FB/Apple/WA/Google fallback) -->
+        <div id="social-name-section" style="display:none;margin-top:12px;">
+          <div class="auth-or-divider" style="margin-bottom:10px;"><span id="social-provider-label">${isRu ? 'Введите данные' : 'Ma\'lumotlarni kiriting'}</span></div>
           <div class="auth-avatar-row" id="social-avatar-row">
             ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
           </div>
-          <input class="auth-name-input" id="social-name-input" type="text" maxlength="40"
-            placeholder="${LANG==='ru'?'Ваше имя *':'Ismingiz *'}">
-          <input class="auth-name-input" id="social-email-input" type="email" maxlength="100"
-            placeholder="${LANG==='ru'?'Email *':'Email *'}" style="margin-top:8px;" required>
-          <div id="social-auth-error" class="auth-error" style="display:none"></div>
-          <button class="auth-submit-btn" id="social-submit-btn">
-            <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
+          <input class="auth-field-input" id="social-name-input" type="text" maxlength="40" placeholder="${isRu?'Ваше имя *':'Ismingiz *'}" style="margin-top:8px">
+          <input class="auth-field-input" id="social-email-input" type="email" maxlength="100" placeholder="Email *" style="margin-top:8px">
+          <div id="social-auth-error" class="auth-error-new" style="display:none"></div>
+          <button class="auth-submit-new" id="social-submit-btn" style="margin-top:10px">
+            <i class="fas fa-sign-in-alt"></i> ${isRu ? 'Войти' : 'Kirish'}
           </button>
         </div>
 
-        <div class="auth-skip">
-          <a id="auth-skip-link">${LANG==='ru'?'Продолжить без входа (гость)':'Kirmasdan davom etish (mehmon)'}</a>
+        <div class="auth-switch-row">
+          ${isRu ? 'Нет аккаунта?' : 'Akkaunt yo\'qmi?'}
+          <a id="goto-register">${isRu ? 'Зарегистрироваться' : 'Ro\'yxatdan o\'tish'}</a>
+        </div>
+        <div class="auth-guest-row">
+          <a id="auth-skip-link"><i class="fas fa-user-secret"></i> ${isRu ? 'Продолжить как гость' : 'Mehmon sifatida davom etish'}</a>
         </div>
       </div>
 
-      <!-- ══ EMAIL LOGIN tab ══ -->
-      <div class="auth-panel" id="auth-panel-email" style="display:none">
-        <div class="auth-title">${LANG==='ru'?'Вход по Email':'Email orqali kirish'}</div>
-        <div class="auth-subtitle">${LANG==='ru'?'Введите email и пароль':'Email va parolni kiriting'}</div>
-        <form id="login-form" autocomplete="on" onsubmit="return false">
-          <input class="auth-name-input" id="login-email" type="email" placeholder="Email *" autocomplete="email" required>
-          <input class="auth-name-input" id="login-password" type="password" placeholder="${LANG==='ru'?'Пароль *':'Parol *'}" style="margin-top:8px;" autocomplete="current-password" required>
-          <div id="login-error" class="auth-error" style="display:none"></div>
-          <button class="auth-submit-btn" id="login-submit-btn" type="submit">
-            <i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}
-          </button>
-        </form>
-        <div class="auth-skip" style="margin-top:10px;">
-          <a id="goto-register">${LANG==='ru'?'Нет аккаунта? Зарегистрироваться':'Akkaunt yo\'qmi? Ro\'yxatdan o\'ting'}</a>
-        </div>
-      </div>
+      <!-- ══ REGISTER PANEL ══ -->
+      <div class="auth-panel-new" id="auth-panel-register" style="display:none">
 
-      <!-- ══ REGISTER tab ══ -->
-      <div class="auth-panel" id="auth-panel-register" style="display:none">
-        <div class="auth-title">${LANG==='ru'?'Создать аккаунт':'Akkaunt yaratish'}</div>
-        <div class="auth-subtitle">${LANG==='ru'?'Тесты сохраняются на сервере и доступны с любого устройства':'Testlar serverda saqlanib barcha qurilmalardan ochiladi'}</div>
+        <!-- Google -->
+        <button class="social-btn-new social-google-new" id="btn-google-reg" data-provider="google">
+          <span class="snb-icon"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg></span>
+          <span class="snb-label">${isRu ? 'Зарегистрироваться через Google' : 'Google orqali ro\'yxat'}</span>
+        </button>
+
+        <div class="auth-or-divider"><span>${isRu ? 'или создать аккаунт' : 'yoki akkaunt yaratish'}</span></div>
+
         <div class="auth-avatar-row" id="reg-avatar-row">
           ${AVATARS.map(a=>`<div class="avatar-opt${a===selectedAvatar?' selected':''}" data-av="${a}">${a}</div>`).join('')}
         </div>
+
         <form id="reg-form" autocomplete="on" onsubmit="return false">
-          <input class="auth-name-input" id="reg-name" type="text" maxlength="40"
-            placeholder="${LANG==='ru'?'Имя или никнейм *':'Ism yoki taxallus *'}" autocomplete="name" required>
-          <input class="auth-name-input" id="reg-email" type="email"
-            placeholder="Email *" style="margin-top:8px;" autocomplete="email" required>
-          <input class="auth-name-input" id="reg-password" type="password"
-            placeholder="${LANG==='ru'?'Пароль (мин. 6 символов) *':'Parol (kamida 6 belgi) *'}" style="margin-top:8px;" autocomplete="new-password" required minlength="6">
-          <input class="auth-name-input" id="reg-password2" type="password"
-            placeholder="${LANG==='ru'?'Повторите пароль *':'Parolni takrorlang *'}" style="margin-top:8px;" autocomplete="new-password" required>
-          <div id="reg-error" class="auth-error" style="display:none"></div>
-          <button class="auth-submit-btn" id="reg-submit-btn" type="submit">
-            <i class="fas fa-user-plus"></i> ${LANG==='ru'?'Зарегистрироваться':'Ro\'yxatdan o\'tish'}
+          <div class="auth-field-group">
+            <label class="auth-field-label">${isRu ? 'Имя или никнейм' : 'Ism yoki taxallus'}</label>
+            <input class="auth-field-input" id="reg-name" type="text" maxlength="40" placeholder="${isRu?'Как вас зовут?':'Ismingiz?'}" autocomplete="name" required>
+          </div>
+          <div class="auth-field-group">
+            <label class="auth-field-label">Email</label>
+            <input class="auth-field-input" id="reg-email" type="email" placeholder="you@example.com" autocomplete="email" required>
+          </div>
+          <div class="auth-field-group">
+            <label class="auth-field-label">${isRu ? 'Пароль' : 'Parol'}</label>
+            <div class="auth-password-wrap">
+              <input class="auth-field-input" id="reg-password" type="password" placeholder="${isRu?'Минимум 6 символов':'Kamida 6 belgi'}" autocomplete="new-password" required minlength="6">
+              <button type="button" class="auth-eye-btn" id="toggle-reg-pw"><i class="fas fa-eye"></i></button>
+            </div>
+          </div>
+          <div class="auth-field-group">
+            <label class="auth-field-label">${isRu ? 'Повторите пароль' : 'Parolni takrorlang'}</label>
+            <input class="auth-field-input" id="reg-password2" type="password" placeholder="••••••••" autocomplete="new-password" required>
+          </div>
+          <div id="reg-error" class="auth-error-new" style="display:none"></div>
+          <button class="auth-submit-new" id="reg-submit-btn" type="submit">
+            <i class="fas fa-user-plus"></i> ${isRu ? 'Создать аккаунт' : 'Akkaunt yaratish'}
           </button>
         </form>
-        <div class="auth-skip" style="margin-top:10px;">
-          <a id="goto-login">${LANG==='ru'?'Уже есть аккаунт? Войти':'Allaqon akkauntingiz bormi? Kiring'}</a>
+
+        <div class="auth-switch-row">
+          ${isRu ? 'Уже есть аккаунт?' : 'Akkauntingiz bormi?'}
+          <a id="goto-login">${isRu ? 'Войти' : 'Kirish'}</a>
+        </div>
+        <div class="auth-guest-row">
+          <a id="auth-skip-link-reg"><i class="fas fa-user-secret"></i> ${isRu ? 'Продолжить как гость' : 'Mehmon sifatida davom etish'}</a>
         </div>
       </div>
 
-    </div>`;
+      <!-- Сброс пароля панель -->
+      <div class="auth-panel-new" id="auth-panel-forgot" style="display:none">
+        <button class="auth-back-btn" id="btn-back-from-forgot">
+          <i class="fas fa-arrow-left"></i> ${isRu ? 'Назад' : 'Orqaga'}
+        </button>
+        <div style="margin-bottom:16px;">
+          <div style="font-size:16px;font-weight:700;margin-bottom:6px;">${isRu?'Восстановление доступа':'Parolni tiklash'}</div>
+          <div style="font-size:13px;color:var(--text-muted);">${isRu?'Введите email — мы пришлём инструкцию':'Emailingizni kiriting — yo\'riqnoma yuboramiz'}</div>
+        </div>
+        <div class="auth-field-group">
+          <label class="auth-field-label">Email</label>
+          <input class="auth-field-input" id="forgot-email" type="email" placeholder="you@example.com" required>
+        </div>
+        <div id="forgot-error" class="auth-error-new" style="display:none"></div>
+        <div id="forgot-success" style="display:none;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:12px;font-size:13px;color:#166534;margin-bottom:12px;">
+          <i class="fas fa-check-circle"></i> ${isRu?'Инструкция отправлена на ваш email':'Ko\'rsatma emailingizga yuborildi'}
+        </div>
+        <button class="auth-submit-new" id="forgot-submit-btn">
+          <i class="fas fa-paper-plane"></i> ${isRu?'Отправить':'Yuborish'}
+        </button>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:12px;text-align:center;">
+          ${isRu?'* Функция будет доступна после настройки email-сервиса':'* Funksiya email xizmati sozlangandan so\'ng ishlaydi'}
+        </p>
+      </div>
+
+    </div>
+  </div>
+
+</div>`;
+
   document.body.appendChild(overlay);
 
-  // ── Tab switching ──
+  // ─── Switch to initial tab ───────────────────────────────
+  if (initialTab === 'register') switchTab('register');
   function switchTab(tabName) {
-    overlay.querySelectorAll('.auth-tab').forEach(t2 => t2.classList.remove('active'));
+    overlay.querySelectorAll('.auth-tab-new').forEach(t2 => t2.classList.remove('active'));
     overlay.querySelector(`[data-tab="${tabName}"]`)?.classList.add('active');
-    overlay.querySelectorAll('.auth-panel').forEach(p => p.style.display = 'none');
-    const panel = document.getElementById('auth-panel-' + tabName);
-    if (panel) panel.style.display = '';
+    ['login','register','forgot'].forEach(name => {
+      const p = document.getElementById('auth-panel-' + name);
+      if (p) p.style.display = name === tabName ? '' : 'none';
+    });
   }
-  overlay.querySelectorAll('.auth-tab').forEach(tab => {
+  overlay.querySelectorAll('.auth-tab-new').forEach(tab => {
     tab.addEventListener('click', () => switchTab(tab.dataset.tab));
   });
 
-  // ── Helper functions ──
+  // ─── Helpers ────────────────────────────────────────────────
   function showError(elId, msg) {
     const el = document.getElementById(elId);
     if (el) { el.textContent = msg; el.style.display = ''; }
@@ -4886,93 +5002,125 @@ function showAuthScreen(afterAuth) {
     const el = document.getElementById(elId);
     if (el) el.style.display = 'none';
   }
-  function setLoading(btnId, loading, origLabel) {
+  function setLoading(btnId, loading) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
     btn.disabled = loading;
     if (loading) {
       btn._origHtml = btn.innerHTML;
-      btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${LANG==='ru'?'Загрузка…':'Yuklanmoqda…'}`;
+      btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${isRu?'Загрузка…':'Yuklanmoqda…'}`;
     } else if (btn._origHtml) {
       btn.innerHTML = btn._origHtml;
     }
   }
-
   async function finishAuth(userData, token) {
     setAuthToken(token);
     saveUser(userData);
     overlay.remove();
-    toast(LANG==='ru'?`Добро пожаловать, ${userData.name}!`:`Xush kelibsiz, ${userData.name}!`, 'success');
-    // First push all local quizzes to server (so they become searchable)
+    toast(isRu?`Добро пожаловать, ${userData.name}!`:`Xush kelibsiz, ${userData.name}!`, 'success');
     await pushAllLocalQuizzesToServer();
-    // Then sync from server (merge)
     await syncQuizzesFromServer();
     syncHistoryFromServer();
-    if (afterAuth) afterAuth();
-    else renderApp();
+    if (afterAuth) afterAuth(); else renderApp();
+  }
+  async function runGuestLogin() {
+    const r = await API.guest(isRu?'Гость':'Mehmon');
+    if (r.ok) {
+      await finishAuth(r.data.user, r.data.token);
+    } else {
+      const user = { name: isRu?'Гость':'Mehmon', avatar:'👤', provider:'guest' };
+      saveUser(user);
+      overlay.remove();
+      if (afterAuth) afterAuth(); else renderApp();
+    }
   }
 
-  // ══════════════════════════════════════════════
-  // Все социальные кнопки (Google/Facebook/Apple/WhatsApp) — открывают форму с именем + email
-  // ══════════════════════════════════════════════
-  let currentProvider = 'google';
+  // ─── Show/hide password toggles ─────────────────────────────
+  document.getElementById('toggle-login-pw')?.addEventListener('click', () => {
+    const inp = document.getElementById('login-password');
+    if (!inp) return;
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    document.querySelector('#toggle-login-pw i').className = show ? 'fas fa-eye-slash' : 'fas fa-eye';
+  });
+  document.getElementById('toggle-reg-pw')?.addEventListener('click', () => {
+    const inp = document.getElementById('reg-password');
+    if (!inp) return;
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    document.querySelector('#toggle-reg-pw i').className = show ? 'fas fa-eye-slash' : 'fas fa-eye';
+  });
 
+  // ─── Other ways toggle ───────────────────────────────────────
+  document.getElementById('btn-other-ways-login')?.addEventListener('click', () => {
+    const list = document.getElementById('other-ways-login');
+    if (!list) return;
+    const open = list.style.display !== 'none';
+    list.style.display = open ? 'none' : '';
+    document.querySelector('#btn-other-ways-login i').className = open ? 'fas fa-ellipsis-h' : 'fas fa-times';
+  });
+
+  // Facebook — redirect only (no form)
+  overlay.querySelectorAll('.social-btn-small[data-provider="facebook"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      toast(isRu ? 'Перенаправление на Facebook...' : 'Facebook ga yo\'naltirilmoqda...', 'info');
+      setTimeout(() => {
+        window.open('https://www.facebook.com/', '_blank');
+      }, 500);
+    });
+  });
+
+  // ─── Social provider form ────────────────────────────────────
+  let currentProvider = 'google';
   function showSocialForm(provider) {
     const names = { google:'Google', facebook:'Facebook', apple:'Apple', whatsapp:'WhatsApp' };
-    const sec = document.getElementById('social-name-section');
-    const divider = document.getElementById('social-provider-divider');
-    if (divider) divider.textContent = LANG==='ru'
-      ? `Введите данные для ${names[provider]}`
-      : `${names[provider]} ma'lumotlarini kiriting`;
     currentProvider = provider;
-    overlay.querySelectorAll('.social-btn').forEach(b => { b.style.opacity='0.5'; b.style.borderColor=''; });
-    const activeBtn = overlay.querySelector(`.social-btn[data-provider="${provider}"]`);
-    if (activeBtn) { activeBtn.style.opacity='1'; activeBtn.style.borderColor='var(--primary)'; }
+    const sec = document.getElementById('social-name-section');
+    const lbl = document.getElementById('social-provider-label');
+    if (lbl) lbl.textContent = isRu ? `Войти через ${names[provider]}` : `${names[provider]} orqali kirish`;
     if (sec) sec.style.display = '';
     hideError('social-auth-error');
-    document.getElementById('social-name-input')?.focus();
+    setTimeout(() => document.getElementById('social-name-input')?.focus(), 50);
   }
 
-  overlay.querySelectorAll('.social-btn[data-provider]').forEach(btn => {
-    btn.addEventListener('click', () => showSocialForm(btn.dataset.provider));
+  // Google buttons (both panels)
+  ['btn-google-login','btn-google-reg'].forEach(id => {
+    document.getElementById(id)?.addEventListener('click', () => showSocialForm('google'));
+  });
+  // Other social (small buttons) — skip Facebook (handled above)
+  overlay.querySelectorAll('.social-btn-small[data-provider]').forEach(btn => {
+    if (btn.dataset.provider === 'facebook') return; // handled separately
+    btn.addEventListener('click', () => {
+      document.getElementById('other-ways-login').style.display = 'none';
+      showSocialForm(btn.dataset.provider);
+    });
   });
 
-  // Avatar selection (social tab)
-  overlay.querySelectorAll('#social-avatar-row .avatar-opt').forEach(el => {
+  // Avatar selection
+  overlay.querySelectorAll('#social-avatar-row .avatar-opt, #reg-avatar-row .avatar-opt').forEach(el => {
     el.addEventListener('click', () => {
-      overlay.querySelectorAll('#social-avatar-row .avatar-opt').forEach(a => a.classList.remove('selected'));
+      const row = el.closest('.auth-avatar-row');
+      row.querySelectorAll('.avatar-opt').forEach(a => a.classList.remove('selected'));
       el.classList.add('selected');
       selectedAvatar = el.dataset.av;
     });
   });
 
-  // Avatar selection (register tab)
-  overlay.querySelectorAll('#reg-avatar-row .avatar-opt').forEach(el => {
-    el.addEventListener('click', () => {
-      overlay.querySelectorAll('#reg-avatar-row .avatar-opt').forEach(a => a.classList.remove('selected'));
-      el.classList.add('selected');
-      selectedAvatar = el.dataset.av;
-    });
-  });
-
-  // ── Social submit (Facebook/Apple/WhatsApp/Google-fallback) ──
+  // Social submit
   document.getElementById('social-submit-btn')?.addEventListener('click', async () => {
     const name = document.getElementById('social-name-input')?.value.trim();
     const email = document.getElementById('social-email-input')?.value.trim();
-    if (!name) { showError('social-auth-error', LANG==='ru'?'Введите имя':'Ismingizni kiriting'); return; }
-    if (!email) { showError('social-auth-error', LANG==='ru'?'Email обязателен':'Email majburiy'); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('social-auth-error', LANG==='ru'?'Введите корректный email':'To\'g\'ri email kiriting'); return; }
+    if (!name) { showError('social-auth-error', isRu?'Введите имя':'Ismingizni kiriting'); return; }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showError('social-auth-error', isRu?'Введите корректный email':'To\'g\'ri email kiriting'); return;
+    }
     hideError('social-auth-error');
     setLoading('social-submit-btn', true);
     const r = await API.social(currentProvider, name, email, selectedAvatar);
     setLoading('social-submit-btn', false);
-    if (r.ok) {
-      await finishAuth(r.data.user, r.data.token);
-    } else {
-      showError('social-auth-error', r.data.error || (LANG==='ru'?'Ошибка входа':'Kirish xatosi'));
-    }
+    if (r.ok) await finishAuth(r.data.user, r.data.token);
+    else showError('social-auth-error', r.data?.error || (isRu?'Ошибка входа':'Kirish xatosi'));
   });
-
   document.getElementById('social-name-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') document.getElementById('social-email-input')?.focus();
   });
@@ -4980,13 +5128,13 @@ function showAuthScreen(afterAuth) {
     if (e.key === 'Enter') document.getElementById('social-submit-btn')?.click();
   });
 
-  // ── Email login submit ──
+  // ─── Email Login ─────────────────────────────────────────────
   document.getElementById('login-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const email = document.getElementById('login-email')?.value.trim();
     const password = document.getElementById('login-password')?.value;
-    if (!email) { showError('login-error', LANG==='ru'?'Введите email':'Email kiriting'); return; }
-    if (!password) { showError('login-error', LANG==='ru'?'Введите пароль':'Parol kiriting'); return; }
+    if (!email) { showError('login-error', isRu?'Введите email':'Email kiriting'); return; }
+    if (!password) { showError('login-error', isRu?'Введите пароль':'Parol kiriting'); return; }
     hideError('login-error');
     setLoading('login-submit-btn', true);
     const r = await API.login(email, password);
@@ -4994,27 +5142,28 @@ function showAuthScreen(afterAuth) {
     if (r.ok) {
       await finishAuth(r.data.user, r.data.token);
     } else {
-      const msg = r.data.error === 'not_found'
-        ? (LANG==='ru'?'Аккаунт не найден. Зарегистрируйтесь.':'Akkaunt topilmadi. Ro\'yxatdan o\'ting.')
-        : r.data.error === 'wrong_password'
-          ? (LANG==='ru'?'Неверный пароль':'Noto\'g\'ri parol')
-          : (LANG==='ru'?'Ошибка входа':'Kirish xatosi');
+      const msg = r.data?.error === 'not_found'
+        ? (isRu?'Аккаунт не найден. Зарегистрируйтесь.':'Akkaunt topilmadi. Ro\'yxatdan o\'ting.')
+        : r.data?.error === 'wrong_password'
+          ? (isRu?'Неверный пароль':'Noto\'g\'ri parol')
+          : (isRu?'Ошибка входа':'Kirish xatosi');
       showError('login-error', msg);
     }
   });
 
-  // ── Register submit ──
+  // ─── Register ────────────────────────────────────────────────
   document.getElementById('reg-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = document.getElementById('reg-name')?.value.trim();
     const email = document.getElementById('reg-email')?.value.trim();
     const pass = document.getElementById('reg-password')?.value;
     const pass2 = document.getElementById('reg-password2')?.value;
-    if (!name) { showError('reg-error', LANG==='ru'?'Введите имя':'Ismingizni kiriting'); return; }
-    if (!email) { showError('reg-error', LANG==='ru'?'Email обязателен':'Email majburiy'); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('reg-error', LANG==='ru'?'Введите корректный email':'To\'g\'ri email kiriting'); return; }
-    if (!pass || pass.length < 6) { showError('reg-error', LANG==='ru'?'Пароль минимум 6 символов':'Parol kamida 6 belgi'); return; }
-    if (pass !== pass2) { showError('reg-error', LANG==='ru'?'Пароли не совпадают':'Parollar mos kelmaydi'); return; }
+    if (!name) { showError('reg-error', isRu?'Введите имя':'Ismingizni kiriting'); return; }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showError('reg-error', isRu?'Введите корректный email':'To\'g\'ri email kiriting'); return;
+    }
+    if (!pass || pass.length < 6) { showError('reg-error', isRu?'Пароль минимум 6 символов':'Parol kamida 6 belgi'); return; }
+    if (pass !== pass2) { showError('reg-error', isRu?'Пароли не совпадают':'Parollar mos kelmaydi'); return; }
     hideError('reg-error');
     setLoading('reg-submit-btn', true);
     const r = await API.register(name, email, pass, selectedAvatar, 'email');
@@ -5022,29 +5171,40 @@ function showAuthScreen(afterAuth) {
     if (r.ok) {
       await finishAuth(r.data.user, r.data.token);
     } else {
-      const msg = r.data.error === 'email_taken'
-        ? (LANG==='ru'?'Этот email уже занят. Войдите через вкладку "Вход"':'Bu email band. "Kirish" yorlig\'idan kiring')
-        : (r.data.error || (LANG==='ru'?'Ошибка регистрации':'Ro\'yxatdan o\'tish xatosi'));
+      const msg = r.data?.error === 'email_taken'
+        ? (isRu?'Этот email уже занят. Войдите.':'Bu email band. Kiring.')
+        : (r.data?.error || (isRu?'Ошибка регистрации':'Ro\'yxatdan o\'tish xatosi'));
       showError('reg-error', msg);
     }
   });
 
-  // ── Go-to links ──
-  document.getElementById('goto-register')?.addEventListener('click', () => switchTab('register'));
-  document.getElementById('goto-login')?.addEventListener('click', () => switchTab('email'));
-
-  // ── Guest ──
-  document.getElementById('auth-skip-link')?.addEventListener('click', async () => {
-    const r = await API.guest(LANG==='ru'?'Гость':'Mehmon');
-    if (r.ok) {
-      await finishAuth(r.data.user, r.data.token);
-    } else {
-      const user = { name: LANG==='ru'?'Гость':'Mehmon', avatar:'👤', provider:'guest' };
-      saveUser(user);
-      overlay.remove();
-      if (afterAuth) afterAuth(); else renderApp();
-    }
+  // ─── Forgot password ─────────────────────────────────────────
+  document.getElementById('btn-forgot-password')?.addEventListener('click', () => {
+    overlay.querySelectorAll('.auth-tab-new').forEach(t => t.classList.remove('active'));
+    ['login','register'].forEach(n => { const p = document.getElementById('auth-panel-'+n); if(p) p.style.display='none'; });
+    document.getElementById('auth-panel-forgot').style.display = '';
+    const v = document.getElementById('login-email')?.value;
+    if (v) { const fe = document.getElementById('forgot-email'); if(fe) fe.value = v; }
   });
+  document.getElementById('btn-back-from-forgot')?.addEventListener('click', () => switchTab('login'));
+  document.getElementById('forgot-submit-btn')?.addEventListener('click', async () => {
+    const email = document.getElementById('forgot-email')?.value.trim();
+    if (!email) { showError('forgot-error', isRu?'Введите email':'Email kiriting'); return; }
+    hideError('forgot-error');
+    setLoading('forgot-submit-btn', true);
+    await new Promise(r => setTimeout(r, 800)); // имитация запроса
+    setLoading('forgot-submit-btn', false);
+    document.getElementById('forgot-success').style.display = '';
+    document.getElementById('forgot-submit-btn').style.display = 'none';
+  });
+
+  // ─── Navigation links ────────────────────────────────────────
+  document.getElementById('goto-register')?.addEventListener('click', () => switchTab('register'));
+  document.getElementById('goto-login')?.addEventListener('click', () => switchTab('login'));
+
+  // ─── Guest ───────────────────────────────────────────────────
+  document.getElementById('auth-skip-link')?.addEventListener('click', runGuestLogin);
+  document.getElementById('auth-skip-link-reg')?.addEventListener('click', runGuestLogin);
 }
 
 
@@ -5360,13 +5520,259 @@ async function init() {
     return;
   }
 
-  // 8. Show auth if first time
+  // 8. Show landing/auth if first time
   if (!state.user) {
-    showAuthScreen(()=>renderApp());
+    renderLandingPage();
     return;
   }
 
   renderApp();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LANDING PAGE — hero, features, social proof, footer
+// ═══════════════════════════════════════════════════════════════
+function renderLandingPage() {
+  const isRu = LANG === 'ru';
+  document.getElementById('app').innerHTML = `
+<div class="landing-root">
+
+  <!-- ── NAV ─────────────────────────────────────────────── -->
+  <nav class="landing-nav">
+    <div class="landing-nav-inner">
+      <div class="landing-brand">
+        <div class="landing-brand-icon"><i class="fas fa-brain"></i></div>
+        <span class="landing-brand-name">QuizMaster Pro</span>
+      </div>
+      <div class="landing-nav-actions">
+        <button class="lnd-btn-ghost" id="lnd-login-btn">
+          ${isRu ? 'Войти' : 'Kirish'}
+        </button>
+        <button class="lnd-btn-primary" id="lnd-reg-btn">
+          ${isRu ? 'Начать бесплатно' : 'Bepul boshlash'}
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── HERO ─────────────────────────────────────────────── -->
+  <section class="landing-hero">
+    <div class="landing-hero-inner">
+      <div class="landing-hero-badge">
+        <i class="fas fa-bolt"></i>
+        ${isRu ? 'Для учителей, тренеров и компаний' : "O'qituvchilar, trenerlar va kompaniyalar uchun"}
+      </div>
+      <h1 class="landing-hero-title">
+        ${isRu
+          ? 'Создавайте тесты.<br><span class="lnd-accent">Проводите онлайн.</span>'
+          : 'Test yarating.<br><span class="lnd-accent">Onlayn o\'tkazing.</span>'}
+      </h1>
+      <p class="landing-hero-desc">
+        ${isRu
+          ? 'Профессиональная платформа для создания интерактивных тестов — быстрый импорт, live-сессии в реальном времени, детальная аналитика и рейтинг.'
+          : "Interaktiv testlar yaratish uchun professional platforma — tezkor import, real vaqtda live sessiyalar, batafsil analitika va reyting."}
+      </p>
+      <div class="landing-hero-cta">
+        <button class="lnd-cta-primary" id="lnd-cta-start">
+          <i class="fas fa-plus-circle"></i>
+          ${isRu ? 'Создать тест — бесплатно' : "Test yaratish — bepul"}
+        </button>
+        <button class="lnd-cta-secondary" id="lnd-cta-find">
+          <i class="fas fa-magnifying-glass"></i>
+          ${isRu ? 'Пройти тест по коду' : "Kod orqali test topish"}
+        </button>
+      </div>
+      <!-- Stats row -->
+      <div class="landing-stats">
+        <div class="lnd-stat">
+          <span class="lnd-stat-val">5+</span>
+          <span class="lnd-stat-lbl">${isRu ? 'типов вопросов' : "savol turlari"}</span>
+        </div>
+        <div class="lnd-stat-divider"></div>
+        <div class="lnd-stat">
+          <span class="lnd-stat-val">∞</span>
+          <span class="lnd-stat-lbl">${isRu ? 'участников' : "ishtirokchilar"}</span>
+        </div>
+        <div class="lnd-stat-divider"></div>
+        <div class="lnd-stat">
+          <span class="lnd-stat-val">PDF</span>
+          <span class="lnd-stat-lbl">${isRu ? 'экспорт' : "eksport"}</span>
+        </div>
+        <div class="lnd-stat-divider"></div>
+        <div class="lnd-stat">
+          <span class="lnd-stat-val">Live</span>
+          <span class="lnd-stat-lbl">${isRu ? 'сессии' : "sessiyalar"}</span>
+        </div>
+      </div>
+    </div>
+    <div class="landing-hero-visual">
+      <div class="lnd-mockup">
+        <div class="lnd-mockup-bar">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="lnd-mockup-body">
+          <div class="lnd-quiz-preview">
+            <div class="lnd-qp-top">
+              <span class="lnd-qp-badge"><i class="fas fa-layer-group"></i> ${isRu ? 'Тест' : "Test"}</span>
+              <span class="lnd-qp-timer"><i class="fas fa-clock"></i> 10:00</span>
+            </div>
+            <div class="lnd-qp-question">${isRu ? 'Вопрос 3 из 10' : "Savol 3 / 10"}</div>
+            <div class="lnd-qp-text">${isRu ? 'Столица Узбекистана?' : "O'zbekiston poytaxti?"}</div>
+            <div class="lnd-qp-options">
+              <div class="lnd-qp-opt lnd-qp-opt-correct"><i class="fas fa-check-circle"></i> ${isRu ? 'Ташкент' : "Toshkent"}</div>
+              <div class="lnd-qp-opt"><i class="far fa-circle"></i> ${isRu ? 'Самарканд' : "Samarqand"}</div>
+              <div class="lnd-qp-opt"><i class="far fa-circle"></i> ${isRu ? 'Бухара' : "Buxoro"}</div>
+              <div class="lnd-qp-opt"><i class="far fa-circle"></i> ${isRu ? 'Наманган' : "Namangan"}</div>
+            </div>
+            <div class="lnd-qp-progress">
+              <div class="lnd-qp-progress-bar" style="width:30%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FEATURES ──────────────────────────────────────────── -->
+  <section class="landing-features">
+    <div class="lnd-section-inner">
+      <div class="lnd-section-header">
+        <h2 class="lnd-section-title">${isRu ? 'Всё что нужно для тестирования' : "Test o'tkazish uchun hamma narsa"}</h2>
+        <p class="lnd-section-sub">${isRu ? 'От простых опросов до корпоративных экзаменов' : "Oddiy so'rovlardan korporativ imtihonlargacha"}</p>
+      </div>
+      <div class="lnd-features-grid">
+        <div class="lnd-feat-card">
+          <div class="lnd-feat-icon" style="background:linear-gradient(135deg,#f59e0b,#d97706)">
+            <i class="fas fa-bolt"></i>
+          </div>
+          <h3>${isRu ? 'Создание за минуты' : "Daqiqalarda yaratish"}</h3>
+          <p>${isRu ? 'Интуитивный конструктор с 5 типами вопросов: один вариант, несколько, правда/ложь, текст, сопоставление' : "5 turdagi savollar bilan intuitiv konstruktor: bitta variant, bir nechta, ha/yo'q, matn"}</p>
+        </div>
+        <div class="lnd-feat-card">
+          <div class="lnd-feat-icon" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">
+            <i class="fas fa-file-import"></i>
+          </div>
+          <h3>${isRu ? 'Импорт из файлов' : "Fayllardan import"}</h3>
+          <p>${isRu ? 'Загрузите Word (.docx) или Excel — система автоматически распознает вопросы и ответы' : "Word (.docx) yoki Excel yuklang — tizim savollar va javoblarni avtomatik taniydi"}</p>
+        </div>
+        <div class="lnd-feat-card">
+          <div class="lnd-feat-icon" style="background:linear-gradient(135deg,#10b981,#059669)">
+            <i class="fas fa-tower-broadcast"></i>
+          </div>
+          <h3>${isRu ? 'Live-сессии' : "Live sessiyalar"}</h3>
+          <p>${isRu ? 'Проводите тесты онлайн с несколькими участниками одновременно. Рейтинг в реальном времени' : "Bir vaqtda bir nechta ishtirokchi bilan testlar o'tkazing. Real vaqtda reyting"}</p>
+        </div>
+        <div class="lnd-feat-card">
+          <div class="lnd-feat-icon" style="background:linear-gradient(135deg,#0ea5e9,#0284c7)">
+            <i class="fas fa-chart-bar"></i>
+          </div>
+          <h3>${isRu ? 'Аналитика и рейтинг' : "Analitika va reyting"}</h3>
+          <p>${isRu ? 'Детальная статистика по каждому участнику, вопросу и попытке. Экспорт PDF и CSV' : "Har bir ishtirokchi, savol va urinish bo'yicha batafsil statistika. PDF va CSV eksport"}</p>
+        </div>
+        <div class="lnd-feat-card">
+          <div class="lnd-feat-icon" style="background:linear-gradient(135deg,#f43f5e,#e11d48)">
+            <i class="fas fa-lock"></i>
+          </div>
+          <h3>${isRu ? 'Управление доступом' : "Kirishni boshqarish"}</h3>
+          <p>${isRu ? 'Защита PIN-кодом, блокировка пользователей, приватные тесты только по коду' : "PIN-kod himoyasi, foydalanuvchilarni bloklash, faqat kod orqali xususiy testlar"}</p>
+        </div>
+        <div class="lnd-feat-card">
+          <div class="lnd-feat-icon" style="background:linear-gradient(135deg,#8b5cf6,#7c3aed)">
+            <i class="fas fa-shuffle"></i>
+          </div>
+          <h3>${isRu ? 'Рандомизация' : "Randomizatsiya"}</h3>
+          <p>${isRu ? 'Перемешивание вопросов и ответов для каждого участника, настраиваемый проходной балл' : "Har bir ishtirokchi uchun savollar va javoblarni aralashtirish, sozlanadigan o'tish bali"}</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── HOW IT WORKS ───────────────────────────────────────── -->
+  <section class="landing-how">
+    <div class="lnd-section-inner">
+      <div class="lnd-section-header">
+        <h2 class="lnd-section-title">${isRu ? 'Как это работает' : "Bu qanday ishlaydi"}</h2>
+      </div>
+      <div class="lnd-steps">
+        <div class="lnd-step">
+          <div class="lnd-step-num">1</div>
+          <div class="lnd-step-icon"><i class="fas fa-user-plus"></i></div>
+          <h4>${isRu ? 'Зарегистрируйтесь' : "Ro'yxatdan o'ting"}</h4>
+          <p>${isRu ? 'Создайте бесплатный аккаунт через Google или email' : "Google yoki email orqali bepul akkaunt yarating"}</p>
+        </div>
+        <div class="lnd-step-arrow"><i class="fas fa-arrow-right"></i></div>
+        <div class="lnd-step">
+          <div class="lnd-step-num">2</div>
+          <div class="lnd-step-icon"><i class="fas fa-plus-circle"></i></div>
+          <h4>${isRu ? 'Создайте тест' : "Test yarating"}</h4>
+          <p>${isRu ? 'Добавьте вопросы вручную или импортируйте из файла' : "Savollarni qo'lda qo'shing yoki fayldan import qiling"}</p>
+        </div>
+        <div class="lnd-step-arrow"><i class="fas fa-arrow-right"></i></div>
+        <div class="lnd-step">
+          <div class="lnd-step-num">3</div>
+          <div class="lnd-step-icon"><i class="fas fa-share-nodes"></i></div>
+          <h4>${isRu ? 'Поделитесь' : "Ulashing"}</h4>
+          <p>${isRu ? 'Отправьте ссылку или код участникам' : "Ishtirokchilarga havola yoki kod yuboring"}</p>
+        </div>
+        <div class="lnd-step-arrow"><i class="fas fa-arrow-right"></i></div>
+        <div class="lnd-step">
+          <div class="lnd-step-num">4</div>
+          <div class="lnd-step-icon"><i class="fas fa-chart-line"></i></div>
+          <h4>${isRu ? 'Анализируйте' : "Tahlil qiling"}</h4>
+          <p>${isRu ? 'Просматривайте результаты и статистику в реальном времени' : "Natijalar va statistikani real vaqtda ko'ring"}</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── CTA BLOCK ─────────────────────────────────────────── -->
+  <section class="landing-cta-block">
+    <div class="lnd-section-inner" style="text-align:center">
+      <h2 class="lnd-cta-block-title">
+        ${isRu ? 'Готовы начать?' : "Boshlashga tayyormisiz?"}
+      </h2>
+      <p class="lnd-cta-block-sub">
+        ${isRu ? 'Бесплатный план включает 5 тестов и 300 прохождений в месяц' : "Bepul rejada 5 ta test va oyiga 300 ta o'tish"}
+      </p>
+      <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:28px;">
+        <button class="lnd-cta-primary lnd-cta-xl" id="lnd-cta-start2">
+          <i class="fas fa-rocket"></i>
+          ${isRu ? 'Создать первый тест' : "Birinchi testni yaratish"}
+        </button>
+        <button class="lnd-cta-secondary lnd-cta-xl" id="lnd-cta-login2">
+          <i class="fas fa-sign-in-alt"></i>
+          ${isRu ? 'Уже есть аккаунт' : "Akkaunt bormi"}
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ────────────────────────────────────────────── -->
+  <footer class="landing-footer">
+    <div class="lnd-footer-inner">
+      <div class="lnd-footer-brand">
+        <div class="landing-brand-icon" style="width:32px;height:32px;font-size:16px;"><i class="fas fa-brain"></i></div>
+        <span class="landing-brand-name" style="font-size:16px;">QuizMaster Pro</span>
+      </div>
+      <div class="lnd-footer-links">
+        <a href="#" class="lnd-footer-link" onclick="return false">${isRu ? 'Политика конфиденциальности' : "Maxfiylik siyosati"}</a>
+        <a href="#" class="lnd-footer-link" onclick="return false">${isRu ? 'Условия использования' : "Foydalanish shartlari"}</a>
+        <a href="mailto:support@quizmaster.pro" class="lnd-footer-link">${isRu ? 'Поддержка' : "Qo'llab-quvvatlash"}</a>
+        <a href="mailto:support@quizmaster.pro" class="lnd-footer-link">${isRu ? 'Контакты' : "Aloqa"}</a>
+      </div>
+      <div class="lnd-footer-copy">&copy; 2025 QuizMaster Pro. ${isRu ? 'Все права защищены.' : "Barcha huquqlar himoyalangan."}</div>
+    </div>
+  </footer>
+
+</div>`;
+
+  // Events
+  document.getElementById('lnd-login-btn')?.addEventListener('click', () => showAuthScreen(() => renderApp(), 'login'));
+  document.getElementById('lnd-reg-btn')?.addEventListener('click', () => showAuthScreen(() => renderApp(), 'register'));
+  document.getElementById('lnd-cta-start')?.addEventListener('click', () => showAuthScreen(() => { renderApp(); setTimeout(() => navigate('create-quiz'), 100); }, 'register'));
+  document.getElementById('lnd-cta-find')?.addEventListener('click', () => showAuthScreen(() => { renderApp(); setTimeout(() => navigate('found-quizzes'), 100); }, 'login'));
+  document.getElementById('lnd-cta-start2')?.addEventListener('click', () => showAuthScreen(() => { renderApp(); setTimeout(() => navigate('create-quiz'), 100); }, 'register'));
+  document.getElementById('lnd-cta-login2')?.addEventListener('click', () => showAuthScreen(() => renderApp(), 'login'));
 }
 
 document.addEventListener('DOMContentLoaded', init);
