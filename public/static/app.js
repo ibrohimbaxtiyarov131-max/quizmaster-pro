@@ -3378,6 +3378,9 @@ async function startLiveHostView(sessionId, maxPart) {
 
   state.liveSession = { id: sessionId, role: 'host', participant_id: null, poll_interval: null };
 
+  // Сохраняем состояние QR между перерисовками
+  let qrVisible = false;
+
   const renderHostView = async () => {
     const r = await API.liveState(sessionId, null);
     if (!r.ok) return;
@@ -3396,9 +3399,9 @@ async function startLiveHostView(sessionId, maxPart) {
     <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:12px;">
       <button class="btn btn-sm btn-secondary" id="live-copy-link"><i class="fas fa-copy"></i> ${LANG==='ru'?'Скопировать ссылку':'Havolani nusxalash'}</button>
       <button class="btn btn-sm btn-secondary" id="live-copy-code"><i class="fas fa-hashtag"></i> ${LANG==='ru'?'Скопировать код':'Kodni nusxalash'}</button>
-      <button class="btn btn-sm btn-secondary" id="live-show-qr"><i class="fas fa-qrcode"></i> QR-код</button>
+      <button class="btn btn-sm btn-secondary ${qrVisible?'btn-primary':''}" id="live-show-qr"><i class="fas fa-qrcode"></i> QR-код</button>
     </div>
-    <div id="live-qr-container" style="display:none;text-align:center;margin-bottom:12px;">
+    <div id="live-qr-container" style="display:${qrVisible?'block':'none'};text-align:center;margin-bottom:12px;">
       <div style="display:inline-block;background:#fff;padding:12px;border-radius:14px;border:2px solid var(--primary);">
         <canvas id="live-qr-canvas" width="200" height="200"></canvas>
       </div>
@@ -3427,6 +3430,11 @@ async function startLiveHostView(sessionId, maxPart) {
   </div>
 </div>`;
 
+      // Если QR был открыт — сразу рисуем его заново
+      if (qrVisible) {
+        drawQRCode('live-qr-canvas', joinUrl);
+      }
+
       document.getElementById('live-copy-link')?.addEventListener('click', () => {
         navigator.clipboard.writeText(joinUrl).then(() => toast(LANG==='ru'?'Ссылка скопирована!':'Havola nusxalandi!','success'));
       });
@@ -3436,9 +3444,11 @@ async function startLiveHostView(sessionId, maxPart) {
       document.getElementById('live-show-qr')?.addEventListener('click', () => {
         const qrContainer = document.getElementById('live-qr-container');
         if (!qrContainer) return;
-        const visible = qrContainer.style.display !== 'none';
-        qrContainer.style.display = visible ? 'none' : 'block';
-        if (!visible) drawQRCode('live-qr-canvas', joinUrl);
+        qrVisible = !qrVisible;
+        qrContainer.style.display = qrVisible ? 'block' : 'none';
+        const qrBtn = document.getElementById('live-show-qr');
+        if (qrBtn) qrBtn.classList.toggle('btn-primary', qrVisible);
+        if (qrVisible) drawQRCode('live-qr-canvas', joinUrl);
       });
       document.getElementById('live-start-now')?.addEventListener('click', async () => {
         await API.liveStart(sessionId);
