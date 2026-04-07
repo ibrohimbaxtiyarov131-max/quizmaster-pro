@@ -3029,7 +3029,7 @@ async function showAdminQuizDetails(quizId, cachedStats) {
     return;
   }
 
-  const { stats, attempts } = r;
+  const { stats, attempts } = r.data;
   body.innerHTML = `
 <div class="grid-4" style="margin-bottom:20px">
   <div class="stat-card"><div class="stat-icon stat-icon-blue"><i class="fas fa-users"></i></div><div><div class="stat-value">${stats.total}</div><div class="stat-label">${t('totalAttempts')}</div></div></div>
