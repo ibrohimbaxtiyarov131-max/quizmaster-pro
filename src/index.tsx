@@ -808,28 +808,28 @@ app.post('/api/live/create', async (c) => {
   }
 
   const sessionId = genSessionCode()
-  const id = nanoid()
   await db.prepare(
     `INSERT INTO live_sessions (id, quiz_id, host_id, host_name, status, q_time_limit, max_participants, quiz_json)
      VALUES (?, ?, ?, ?, 'waiting', ?, ?, ?)`
-  ).bind(id, quiz_id, host.id, host.name, q_time_limit, limits.maxLive, quiz.questions_json).run()
+  ).bind(sessionId, quiz_id, host.id, host.name, q_time_limit, limits.maxLive, quiz.questions_json).run()
 
-  return c.json({ ok: true, session_id: id, session_code: id, host_name: host.name, max_participants: limits.maxLive })
+  return c.json({ ok: true, session_id: sessionId, session_code: sessionId, host_name: host.name, max_participants: limits.maxLive })
 })
 
 // POST /api/live/:id/join — участник присоединяется
 app.post('/api/live/:id/join', async (c) => {
   const db = c.env.DB
-  const sessionId = c.req.param('id')
+  const codeOrId = c.req.param('id').toUpperCase().trim()
   const { name, avatar = '🧑' } = await c.req.json() as any
   const user = await getUserFromToken(db, getToken(c))
 
-  const session = await db.prepare('SELECT * FROM live_sessions WHERE id=?').bind(sessionId).first() as any
+  // Search by id (which is now the short code)
+  const session = await db.prepare('SELECT * FROM live_sessions WHERE UPPER(id)=?').bind(codeOrId).first() as any
   if (!session) return c.json({ error: 'session_not_found' }, 404)
   if (session.status === 'finished') return c.json({ error: 'session_finished' }, 410)
 
   // Count participants
-  const cnt = await db.prepare('SELECT COUNT(*) as c FROM live_participants WHERE session_id=?').bind(sessionId).first() as any
+  const cnt = await db.prepare('SELECT COUNT(*) as c FROM live_participants WHERE session_id=?').bind(session.id).first() as any
   if ((cnt?.c || 0) >= session.max_participants) return c.json({ error: 'session_full' }, 403)
 
   const partId = nanoid()
@@ -838,7 +838,7 @@ app.post('/api/live/:id/join', async (c) => {
 
   await db.prepare(
     `INSERT INTO live_participants (id, session_id, user_id, name, avatar) VALUES (?, ?, ?, ?, ?)`
-  ).bind(partId, sessionId, user?.id || null, displayName, displayAvatar).run()
+  ).bind(partId, session.id, user?.id || null, displayName, displayAvatar).run()
 
   const questions = JSON.parse(session.quiz_json || '[]')
   return c.json({

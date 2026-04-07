@@ -2876,10 +2876,15 @@ function renderAdmin() {
     const r = await API.getAdminOverview().catch(() => null);
     if (!r || !r.ok) {
       area.innerHTML = `<div style="padding:40px;text-align:center;color:var(--danger)"><i class="fas fa-exclamation-triangle"></i> ${LANG==='ru'?'Ошибка загрузки данных':'Ma\'lumotlarni yuklashda xatolik'}</div>`;
+      const errDetail = r?.data?.error || '';
+      if (errDetail === 'unauthorized') {
+        area.innerHTML += `<div style="text-align:center;margin-top:12px;"><button class="btn btn-primary" id="btn-admin-login2"><i class="fas fa-sign-in-alt"></i> ${LANG==='ru'?'Войти':'Kirish'}</button></div>`;
+        document.getElementById('btn-admin-login2')?.addEventListener('click', () => showAuthScreen(() => renderAdmin()));
+      }
       return;
     }
 
-    const { totalAttempts, totalUsers, recentAttempts, quizzes: qStats } = r;
+    const { totalAttempts, totalUsers, recentAttempts, quizzes: qStats } = r.data;
     const allAttempts = recentAttempts || [];
     const maxAttempts = Math.max(1, ...qStats.map(s => s.attemptCount));
     const overallAvg = qStats.length ? Math.round(qStats.reduce((s, q) => s + (q.avgPercent || 0), 0) / qStats.length) : 0;
@@ -3306,8 +3311,13 @@ function renderLive() {
     if (!r.ok) {
       if (r.data?.error === 'no_points') {
         showUpgradeModal('live_start', r.data.have, r.data.need);
+      } else if (r.data?.error === 'unauthorized') {
+        toast(LANG==='ru'?'Войдите в аккаунт для создания сессии':'Sessiya yaratish uchun akkauntga kiring', 'error');
+        showAuthScreen(() => navigate('live'));
+      } else if (r.data?.error === 'quiz_not_found') {
+        toast(LANG==='ru'?'Тест не найден. Сначала сохраните тест.':'Test topilmadi. Avval testni saqlang.', 'error');
       } else {
-        toast(r.data?.error || (LANG==='ru'?'Ошибка':'Xatolik'), 'error');
+        toast(LANG==='ru'?`Ошибка: ${r.data?.error||'неизвестно'}`:`Xatolik: ${r.data?.error||'nomalum'}`, 'error');
       }
       return;
     }
@@ -3527,13 +3537,18 @@ async function startLiveHostView(sessionId, maxPart) {
 async function joinLiveSession(sessionId, name, avatar) {
   const r = await API.liveJoin(sessionId, name, avatar);
   if (!r.ok) {
-    const msgs = { session_not_found: LANG==='ru'?'Сессия не найдена':'Sessiya topilmadi', session_finished: LANG==='ru'?'Сессия уже завершена':'Sessiya tugagan', session_full: LANG==='ru'?'Сессия переполнена':'Sessiya to\'la' };
-    toast(msgs[r.data?.error] || (LANG==='ru'?'Ошибка подключения':'Ulanishda xatolik'), 'error');
+    const msgs = {
+      session_not_found: LANG==='ru'?'Сессия не найдена. Проверьте код':'Sessiya topilmadi. Kodni tekshiring',
+      session_finished: LANG==='ru'?'Сессия уже завершена':'Sessiya tugagan',
+      session_full: LANG==='ru'?'Сессия переполнена':'Sessiya to\'la',
+      unauthorized: LANG==='ru'?'Требуется вход в аккаунт':'Akkauntga kirish talab qilinadi',
+    };
+    toast(msgs[r.data?.error] || (LANG==='ru'?`Ошибка: ${r.data?.error||r.status}`:`Xatolik: ${r.data?.error||r.status}`), 'error');
     return;
   }
   const partId = r.data.participant_id;
-  state.liveSession = { id: sessionId, role: 'participant', participant_id: partId, poll_interval: null };
-  startLiveParticipantView(sessionId, partId);
+  state.liveSession = { id: r.data.session?.id || sessionId, role: 'participant', participant_id: partId, poll_interval: null };
+  startLiveParticipantView(r.data.session?.id || sessionId, partId);
 }
 
 function startLiveParticipantView(sessionId, partId) {
